@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+.env
+
+# Runtime (NO versionar)
+work/
+salida/
+logs/
+
+# Estados / parciales
+*_estado.json
+*_partials.jsonl
+
+# Audios y derivados
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.aac
+*.wma
+
+# SO / editores
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

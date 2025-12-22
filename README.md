@@ -1,5 +1,14 @@
 # whisper-local-transcriber
 
+## Quick start (CPU only)
+
+```bash
+git clone https://github.com/Januka19/whisper-local-transcriber.git
+cd whisper-local-transcriber
+./run.sh /ruta/al/audio.m4a
+```
+---
+
 🎙️ **Transcriptor local robusto en CPU para audios largos**, con **diarización ligera por turnos**.  
 Diseñado para entrevistas, reuniones y trabajo de campo, **sin depender de la nube ni GPU**.
 
@@ -122,3 +131,4 @@ Puedes proponer:
 ## 📌 Estado del proyecto
 🟢 **Estable y probado en uso real**  
 🟡 **En mejora continua**
+

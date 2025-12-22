@@ -38,29 +38,15 @@ sudo apt install -y ffmpeg
 ```
 ---
 
-## 🚀 Quick Start (Ubuntu)
+## 🚀 Quick start
 
-### 1️⃣ Clonar el repositorio
 ```
 git clone https://github.com/Januka19/whisper-local-transcriber.git
 cd whisper-local-transcriber
+./run.sh audio.m4a
 ```
-### 2️⃣ Crear entorno virtual
-```
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-### 3️⃣ Ejecutar el transcriptor
-```
-./run.sh
-```
-El script se ejecuta en modo asistido y solicitará:
-Ruta del archivo de audio
-Idioma
-Número de participantes
-Parámetros recomendados para ejecución en CPU
-Los resultados se guardan automáticamente en la carpeta salida/.
+
+Si no se proporciona un archivo de audio, el programa inicia en modo asistido (interactivo).
 
 ---
 

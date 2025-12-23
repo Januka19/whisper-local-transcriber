@@ -1227,14 +1227,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
     if failed:
         write_log(log_path, f"⚠️ Chunks fallidos: {sorted(list(failed))}")
     write_log(log_path, f"Tiempo total: {(t1-t0)/60:.1f} min\n")
+    
+        # --- Limpieza final opcional ---
+    if getattr(args, "clean", False):
+        clean_workspace(
+            workdir=args.workdir,
+            logdir=args.logdir,
+            outdir=args.outdir,   # no se borra
+            audio_name=audio_name
+        )
 
-if getattr(args, "clean", False):
-    clean_workspace(
-        workdir=args.workdir,
-        logdir=args.logdir,
-        outdir=args.outdir,
-        audio_name=audio_name
-    )
 
 # ============================================================================
 # CLI Y PUNTO DE ENTRADA

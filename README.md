@@ -1,114 +1,85 @@
 # whisper-local-transcriber
 
-🎙️ **Transcriptor local robusto en CPU para audios largos**, con **diarización ligera por turnos**.  
-Diseñado para entrevistas, reuniones y trabajo de campo, **sin depender de la nube ni GPU**.
+Transcripción local robusta en CPU para audios largos, con diarización ligera.
+Diseñado para flujos de trabajo **offline**, priorizando la privacidad y el
+control total de la información.
 
----
+## 🚀 Características
 
-## 🎯 Objetivo
-Proveer un sistema **estable, mantenible y 100% local** para transcribir audios largos en español (y otros idiomas), optimizado para laptops comunes, con salidas listas para análisis posterior.
+- Transcripción local utilizando OpenAI Whisper
+- Ejecución en CPU (no requiere GPU)
+- Diarización ligera de hablantes
+- Modo asistente interactivo
+- Espacio de trabajo limpio y salidas organizadas
+- Licencia GPLv3
 
----
+## 📦 Instalación
 
-## ✨ Características
-- Transcripción **100% local** (CPU-only)
-- Optimizado para **audios largos**
-- Reanudación automática si el proceso se interrumpe
-- **Diarización simple por turnos** (Participante A / B / C)
-- Salidas en **TXT** y **JSON**
-- Modo **asistido por consola**
-- Licencia **GPLv3 (copyleft)**
-
-> ⚠️ **Nota**  
-> La diarización es **ligera**, basada en pausas y duración.  
-> No realiza identificación acústica de voces.
-
-> ⚠️ **Uso avanzado — `--force_reuse_chunks`**  
-> Forzar la reutilización de chunks puede ahorrar mucho tiempo (no vuelves a generar chunks ni normalizar el audio), pero **debes usarlo con precaución**: no sobreescribe el hecho de que el audio debe ser el mismo; si los parámetros de chunking difieren o el audio cambió, la ejecución puede producir timecodes incorrectos o resultados inesperados.  
-> Ejemplo: `./run.sh audio.m4a --force_reuse_chunks`  
-> Recomendado sólo si sabes que los chunks en `work/` son compatibles con la ejecución actual.
-
-## 🖥️ Requisitos
-
-### Sistema
-- Linux (probado en Ubuntu)
-- Python 3.9+
-- `ffmpeg` y `ffprobe`
-### Instalación en Ubuntu
-```
-sudo apt update
-sudo apt install -y ffmpeg
-```
----
-
-## 🚀 Quick start
+Clona el repositorio e instala las dependencias:
 
 ```
 git clone https://github.com/Januka19/whisper-local-transcriber.git
 cd whisper-local-transcriber
-./run.sh audio.m4a
+pip install -r requirements.txt
 ```
 
-Si no se proporciona un archivo de audio, el programa inicia en modo asistido (interactivo).
+## ▶️ Uso
 
----
+Ejecuta el script principal:
+
+```
+bash run.sh
+```
+Sigue las instrucciones del asistente para transcribir archivos de audio de forma local
 
 ## 📁 Estructura del proyecto
-```text
+
 whisper-local-transcriber/
-├── src/
-│   └── transcriptor.py      # Núcleo del sistema de transcripción
-├── run.sh                   # Punto de entrada único
-├── requirements.txt         # Dependencias Python
+├── src/                     # Lógica principal de la aplicación
+├── .github/                 # Estándares de comunidad y contribución
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
+│   ├── SECURITY.md
+│   └── ISSUE_TEMPLATE/
 ├── README.md
 ├── LICENSE
-├── work/                    # Archivos temporales (no versionado)
-├── salida/                  # Resultados finales
-└── logs/                    # Logs de ejecución
-```
----
-
-## 📄 Salidas
-Por cada audio procesado, el sistema genera los siguientes archivos en la carpeta `salida/`:
-
-- `*_transcripcion_final.txt`  
-  Transcripción completa en texto plano, con marcas de turnos (Participante A/B/C).
-
-- `*_transcripcion_final.json`  
-  Transcripción estructurada en formato JSON, útil para análisis posterior,
-  procesamiento con IA generativa o integración con otros sistemas.
-
----
-
-## 🔒 Licencia
-Este proyecto se distribuye bajo **GNU GPL v3**.
-
-Cualquier modificación o redistribución debe mantenerse bajo la misma licencia  
-y publicar el código fuente correspondiente.
-
----
+├── requirements.txt
+└── run.sh
 
 ## 🤝 Contribuciones
-Las contribuciones son bienvenidas mediante **issues** o **pull requests**.
 
-Puedes proponer:
-- mejoras en la diarización por turnos
-- optimizaciones de rendimiento en CPU
-- nuevos formatos de salida
-- mejoras de usabilidad y documentación
+Las contribuciones son bienvenidas y valoradas.
+Antes de contribuir, por favor revisa:
 
----
+📘 Código de Conducta
+🛠️ Guía de Contribución
+🔐 Política de Seguridad
 
-## 🧭 Roadmap
-- Mejora de la diarización por turnos
-- Modo no interactivo (`--audio archivo.wav`)
-- Exportación a Markdown / DOCX
-- Optimización adicional para ejecución en CPU
-- Mejora de mensajes y validaciones para personas usuarias no técnicas
+Toda la documentación relacionada con la comunidad se encuentra centralizada en
+la carpeta .github/.
 
----
+## 🔐 Seguridad
 
-## 📌 Estado del proyecto
-🟢 **Estable y probado en uso real**  
-🟡 **En mejora continua**
+Si identificas una vulnerabilidad de seguridad, por favor repórtala de manera
+responsable.
+Consulta la Política de Seguridad para más detalles.
 
+## 📄 Licencia
+
+Este proyecto se distribuye bajo la licencia GNU General Public License v3.0.
+Consulta el archivo LICENSE para más información.
+
+## 🧭 Hoja de ruta (corto plazo)
+
+Mejorar la precisión de la diarización
+Exportación opcional a formatos JSON y SRT
+Cobertura básica de pruebas
+Mejora continua de la documentación
+
+## 📌 Versionado
+
+Versión actual: v0.2.1
+
+Esta versión se enfoca en la estandarización del proyecto, mejoras de
+documentación y preparación para la colaboración con la comunidad.
+No se incluyen cambios funcionales.

@@ -34,6 +34,7 @@ Sigue las instrucciones del asistente para transcribir archivos de audio de form
 
 ## 📁 Estructura del proyecto
 
+```text
 whisper-local-transcriber/
 ├── src/                     # Lógica principal de la aplicación
 ├── .github/                 # Estándares de comunidad y contribución
@@ -45,6 +46,7 @@ whisper-local-transcriber/
 ├── LICENSE
 ├── requirements.txt
 └── run.sh
+```
 
 ## 🤝 Contribuciones
 

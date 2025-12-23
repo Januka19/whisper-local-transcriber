@@ -23,8 +23,10 @@ Proveer un sistema **estable, mantenible y 100% local** para transcribir audios 
 > La diarización es **ligera**, basada en pausas y duración.  
 > No realiza identificación acústica de voces.
 
----
-
+> ⚠️ **Uso avanzado — `--force_reuse_chunks`**  
+> Forzar la reutilización de chunks puede ahorrar mucho tiempo (no vuelves a generar chunks ni normalizar el audio), pero **debes usarlo con precaución**: no sobreescribe el hecho de que el audio debe ser el mismo; si los parámetros de chunking difieren o el audio cambió, la ejecución puede producir timecodes incorrectos o resultados inesperados.  
+> Ejemplo: `./run.sh audio.m4a --force_reuse_chunks`  
+> Recomendado sólo si sabes que los chunks en `work/` son compatibles con la ejecución actual.
 ## 🖥️ Requisitos
 
 ### Sistema

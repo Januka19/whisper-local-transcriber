@@ -135,14 +135,17 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
-# Validar venv
-python -c "import sys; assert sys.executable" >/dev/null 2>&1 || {
-  warn "Venv dañada. Recreando..."
+# Validar venv: revisar pip y python accesibles
+python -c "import sys; assert sys.executable" >/dev/null 2>&1 && \
+python -m pip --version >/dev/null 2>&1 || {
+  warn "Venv dañada o pip no disponible. Recreando..."
   deactivate || true
   rm -rf "$VENV_DIR"
   "$PYTHON_BIN" -m venv "$VENV_DIR"
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
+  # Verificar pip después de recrear
+  python -m pip --version >/dev/null 2>&1 || die "pip sigue no disponible después de recrear venv. Intenta: PYTHON_BIN=python3.12 ./run.sh --rebuild-venv"
 }
 
 mkdir -p "$LOG_DIR" "$WORK_DIR" "$OUT_DIR"

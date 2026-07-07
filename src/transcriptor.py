@@ -82,6 +82,9 @@ MODEL_ALIASES = {
     "turbo-int8": TURBO_INT8_CT2,
     "large-v3-turbo-int8": TURBO_INT8_CT2,
     "large-v3-turbo-int8-ct2": TURBO_INT8_CT2,
+    "large-v3": "large-v3",
+    "large-v2": "large-v2",
+    "medium": "medium",
     # Si alguien pone "turbo", le damos una salida razonable (INT8 CT2)
     "turbo": TURBO_INT8_CT2,
     "large-v3-turbo": TURBO_INT8_CT2,
@@ -169,6 +172,36 @@ def safe_mkdir(path: str) -> None:
 
 def now_stamp() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
+
+
+def probe_audio_info(path: str) -> Dict[str, Any]:
+    out = run_cmd([
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=sample_rate,channels",
+        "-of", "json",
+        path,
+    ])
+    try:
+        data = json.loads(out)
+    except Exception:
+        return {"sample_rate": 0, "channels": 0}
+
+    streams = data.get("streams") or []
+    if not streams:
+        return {"sample_rate": 0, "channels": 0}
+
+    stream = streams[0] or {}
+    return {
+        "sample_rate": int(stream.get("sample_rate") or 0),
+        "channels": int(stream.get("channels") or 0),
+    }
+
+
+def audio_needs_normalization(audio_info: Dict[str, Any]) -> bool:
+    sample_rate = int(audio_info.get("sample_rate") or 0)
+    channels = int(audio_info.get("channels") or 0)
+    return sample_rate != 16000 or channels != 1
 
 
 class Logger:
@@ -838,10 +871,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # Normalize (opcional)
     input_for_split = audio_path
     if args.normalize:
-        if not os.path.exists(normalized_wav):
-            log.write("🔧 Normalizando a WAV 16k mono...")
-            normalize_to_wav_16k_mono(audio_path, normalized_wav)
-        input_for_split = normalized_wav
+        if os.path.exists(normalized_wav):
+            log.write("♻️ Reutilizando WAV normalizado existente.")
+            input_for_split = normalized_wav
+        else:
+            audio_info = probe_audio_info(audio_path)
+            if audio_needs_normalization(audio_info):
+                log.write("🔧 Normalizando a WAV 16k mono...")
+                normalize_to_wav_16k_mono(audio_path, normalized_wav)
+                input_for_split = normalized_wav
+            else:
+                log.write("✅ El audio ya está en 16 kHz mono; se reutiliza sin re-normalizar.")
+                input_for_split = audio_path
 
     # Chunks: reuso si metadata coincide
     safe_mkdir(chunks_dir)

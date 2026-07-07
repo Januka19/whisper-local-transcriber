@@ -27,6 +27,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+MIN_PYTHON = (3, 8)
+VALID_COMPUTE_TYPES = {"int8", "int16", "float16", "float32"}
+
+if sys.version_info < MIN_PYTHON:
+    raise SystemExit("whisper-local-transcriber requiere Python 3.8 o superior.")
+
 try:
     from argparse import BooleanOptionalAction
 except ImportError:
@@ -52,6 +58,7 @@ Prompt = None
 Confirm = None
 IntPrompt = None
 FloatPrompt = None
+RICH_PROGRESS = None
 
 
 def init_rich() -> None:
@@ -221,7 +228,7 @@ def ffprobe_duration_seconds(path: str) -> float:
 
 
 def safe_mkdir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 def now_stamp() -> str:
@@ -692,7 +699,7 @@ def normalize_compute_type(value: str, *, allow_empty: bool = False) -> str:
     cleaned = (value or "").strip().lower()
     if not cleaned and allow_empty:
         return ""
-    if cleaned not in {"int8", "int16", "float16", "float32"}:
+    if cleaned not in VALID_COMPUTE_TYPES:
         raise ValueError("compute_type inválido. Usa: int8, int16, float16 o float32.")
     return cleaned
 
@@ -1094,14 +1101,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
     task_chunks = None
     try:
         if use_progress:
-            rich_progress = importlib.import_module("rich.progress")
-            progress = rich_progress.Progress(
-                rich_progress.SpinnerColumn(),
-                rich_progress.TextColumn("{task.description}"),
-                rich_progress.BarColumn(),
-                rich_progress.TextColumn("{task.completed}/{task.total} chunks"),
-                rich_progress.TimeElapsedColumn(),
-                rich_progress.TimeRemainingColumn(),
+            global RICH_PROGRESS
+            if RICH_PROGRESS is None:
+                RICH_PROGRESS = importlib.import_module("rich.progress")
+            progress = RICH_PROGRESS.Progress(
+                RICH_PROGRESS.SpinnerColumn(),
+                RICH_PROGRESS.TextColumn("{task.description}"),
+                RICH_PROGRESS.BarColumn(),
+                RICH_PROGRESS.TextColumn("{task.completed}/{task.total} chunks"),
+                RICH_PROGRESS.TimeElapsedColumn(),
+                RICH_PROGRESS.TimeRemainingColumn(),
                 console=console,
             )
             progress.__enter__()

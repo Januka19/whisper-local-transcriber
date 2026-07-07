@@ -14,7 +14,7 @@ set -euo pipefail
 #   --no-log           No hace tee a archivo de log
 #
 # Env vars:
-#   PYTHON_BIN=python3.12   fuerza python (por ejemplo python3.12)
+#   PYTHON_BIN=python3.12   fuerza python si no quieres usar la selección automática
 # ============================================================
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +30,6 @@ LOG_DIR="logs"
 REBUILD_VENV=false
 FORCE_INSTALL=false
 SYSTEM_DEPS=false
-GUI=false
 NO_LOG_FLAG=false
 ARGS=()
 
@@ -50,13 +49,13 @@ on_error() {
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
+python_ok() { "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; }
 
 for arg in "$@"; do
   case "$arg" in
     --rebuild-venv) REBUILD_VENV=true ;;
     --force-install) FORCE_INSTALL=true ;;
     --system-deps) SYSTEM_DEPS=true ;;
-    --gui) GUI=true ;;
     --no-log) NO_LOG_FLAG=true ;;
     *) ARGS+=("$arg") ;;
   esac
@@ -64,26 +63,21 @@ done
 
 # -------------------- selección de Python --------------------
 if [[ -z "${PYTHON_BIN:-}" ]]; then
-  # Preferimos 3.12 si está disponible; si no, tomamos python3.
-  if need_cmd python3.12; then
-    PYTHON_BIN="python3.12"
-  elif need_cmd python3.11; then
-    PYTHON_BIN="python3.11"
-  else
-    PYTHON_BIN="python3"
-  fi
+  for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+    if need_cmd "$candidate" && python_ok "$candidate"; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
 fi
 
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 need_cmd "$PYTHON_BIN" || die "No se encontró '$PYTHON_BIN'. Instálalo y vuelve a intentar."
 
 PY_VER="$($PYTHON_BIN -c 'import sys; print("{}.{}.{}".format(sys.version_info.major, sys.version_info.minor, sys.version_info.micro))')"
-PY_MM="$($PYTHON_BIN -c 'import sys; print("{}.{}".format(sys.version_info.major, sys.version_info.minor))')"
 info "Python seleccionado: $PYTHON_BIN (v$PY_VER)"
 
-if [[ "$PY_MM" =~ ^3\.(13|14|15)$ ]]; then
-  warn "Python $PY_MM puede no tener wheels para algunas dependencias en ciertas distros."
-  warn "Si tienes problemas instalando, prueba con: PYTHON_BIN=python3.12 ./run.sh --rebuild-venv"
-fi
+python_ok "$PYTHON_BIN" || die "Se requiere Python 3.8 o superior."
 
 # -------------------- deps de sistema (opcional) --------------------
 install_system_deps() {
@@ -93,16 +87,16 @@ install_system_deps() {
   fi
 
   if need_cmd dnf; then
-    info "Detectado dnf (Fedora/RHEL). Instalando ffmpeg y Tk..."
-    sudo dnf install -y ffmpeg-free ffmpeg-free-devel python3-tkinter || true
+    info "Detectado dnf (Fedora/RHEL). Instalando ffmpeg..."
+    sudo dnf install -y ffmpeg-free ffmpeg-free-devel || true
     sudo dnf install -y ffmpeg || true
   elif need_cmd apt-get; then
-    info "Detectado apt-get (Debian/Ubuntu). Instalando ffmpeg y Tk..."
+    info "Detectado apt-get (Debian/Ubuntu). Instalando ffmpeg..."
     sudo apt-get update -y
-    sudo apt-get install -y ffmpeg python3-tk
+    sudo apt-get install -y ffmpeg
   else
     warn "No pude detectar gestor de paquetes (dnf/apt-get)."
-    warn "Instala manualmente: ffmpeg + ffprobe y (si quieres GUI) tkinter."
+    warn "Instala manualmente: ffmpeg + ffprobe."
   fi
 }
 
@@ -119,8 +113,6 @@ if ! need_cmd ffmpeg || ! need_cmd ffprobe; then
   exit 1
 fi
 
-# (GUI removed) tkinter validation no longer needed
-
 # -------------------- venv --------------------
 if [[ -d "$VENV_DIR" && "$REBUILD_VENV" == "true" ]]; then
   warn "Se solicitó --rebuild-venv. Eliminando venv..."
@@ -135,17 +127,17 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
-# Validar venv: revisar pip y python accesibles
+# Validar venv: revisar pip, python y compatibilidad de versión
 python -c "import sys; assert sys.executable" >/dev/null 2>&1 && \
-python -m pip --version >/dev/null 2>&1 || {
-  warn "Venv dañada o pip no disponible. Recreando..."
+python -m pip --version >/dev/null 2>&1 && \
+python_ok python || {
+  warn "Venv dañada, desactualizada o pip no disponible. Recreando..."
   deactivate || true
   rm -rf "$VENV_DIR"
   "$PYTHON_BIN" -m venv "$VENV_DIR"
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
-  # Verificar pip después de recrear
-  python -m pip --version >/dev/null 2>&1 || die "pip sigue no disponible después de recrear venv. Intenta: PYTHON_BIN=python3.12 ./run.sh --rebuild-venv"
+  python -m pip --version >/dev/null 2>&1 || die "pip sigue no disponible después de recrear venv."
 }
 
 mkdir -p "$LOG_DIR" "$WORK_DIR" "$OUT_DIR"

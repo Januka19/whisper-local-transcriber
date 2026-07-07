@@ -21,7 +21,9 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
 VENV_DIR=".venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
 REQ_FILE="requirements.txt"
+REQ_STAMP_FILE="$VENV_DIR/.requirements.sha256"
 
 WORK_DIR="work"
 OUT_DIR="salida"
@@ -50,6 +52,25 @@ trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 python_ok() { "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; }
+requirements_fingerprint() {
+  "$PYTHON_BIN" - <<'PY'
+from pathlib import Path
+import hashlib
+print(hashlib.sha256(Path("requirements.txt").read_bytes()).hexdigest())
+PY
+}
+needs_python_deps_install() {
+  local expected_hash current_hash
+  expected_hash="$(requirements_fingerprint)"
+  if [[ ! -f "$REQ_STAMP_FILE" ]]; then
+    return 0
+  fi
+  current_hash="$(cat "$REQ_STAMP_FILE" 2>/dev/null || true)"
+  [[ "$current_hash" != "$expected_hash" ]]
+}
+write_requirements_stamp() {
+  requirements_fingerprint > "$REQ_STAMP_FILE"
+}
 
 for arg in "$@"; do
   case "$arg" in
@@ -60,6 +81,13 @@ for arg in "$@"; do
     *) ARGS+=("$arg") ;;
   esac
 done
+
+SKIP_SYSTEM_CHECKS=false
+if [[ ${#ARGS[@]} -gt 0 ]]; then
+  case "${ARGS[0]}" in
+    -h|--help) SKIP_SYSTEM_CHECKS=true ;;
+  esac
+fi
 
 # -------------------- selección de Python --------------------
 if [[ -z "${PYTHON_BIN:-}" ]]; then
@@ -73,15 +101,13 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 need_cmd "$PYTHON_BIN" || die "No se encontró '$PYTHON_BIN'. Instálalo y vuelve a intentar."
+python_ok "$PYTHON_BIN" || die "Se requiere Python 3.8 o superior."
 
 PY_VER="$($PYTHON_BIN -c 'import sys; print("{}.{}.{}".format(sys.version_info.major, sys.version_info.minor, sys.version_info.micro))')"
 info "Python seleccionado: $PYTHON_BIN (v$PY_VER)"
 
-python_ok "$PYTHON_BIN" || die "Se requiere Python 3.8 o superior."
-
 # -------------------- deps de sistema (opcional) --------------------
 install_system_deps() {
-  # Intento best-effort. Requiere sudo.
   if ! need_cmd sudo; then
     die "--system-deps requiere sudo, pero no está disponible."
   fi
@@ -104,13 +130,14 @@ if [[ "$SYSTEM_DEPS" == "true" ]]; then
   install_system_deps
 fi
 
-# Validar ffmpeg/ffprobe
-if ! need_cmd ffmpeg || ! need_cmd ffprobe; then
-  warn "No se encontró ffmpeg/ffprobe en PATH."
-  warn "- Fedora: sudo dnf install -y ffmpeg-free ffmpeg-free-devel"
-  warn "- Ubuntu/Debian: sudo apt-get install -y ffmpeg"
-  warn "Puedes reintentar con: ./run.sh --system-deps"
-  exit 1
+if [[ "$SKIP_SYSTEM_CHECKS" != "true" ]]; then
+  if ! need_cmd ffmpeg || ! need_cmd ffprobe; then
+    warn "No se encontró ffmpeg/ffprobe en PATH."
+    warn "- Fedora: sudo dnf install -y ffmpeg-free ffmpeg-free-devel"
+    warn "- Ubuntu/Debian: sudo apt-get install -y ffmpeg"
+    warn "Puedes reintentar con: ./run.sh --system-deps"
+    exit 1
+  fi
 fi
 
 # -------------------- venv --------------------
@@ -124,20 +151,14 @@ if [[ ! -d "$VENV_DIR" ]]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
-
 # Validar venv: revisar pip, python y compatibilidad de versión
-python -c "import sys; assert sys.executable" >/dev/null 2>&1 && \
-python -m pip --version >/dev/null 2>&1 && \
-python_ok python || {
+"$VENV_PYTHON" -c "import sys; assert sys.executable" >/dev/null 2>&1 && \
+"$VENV_PYTHON" -m pip --version >/dev/null 2>&1 && \
+python_ok "$VENV_PYTHON" || {
   warn "Venv dañada, desactualizada o pip no disponible. Recreando..."
-  deactivate || true
   rm -rf "$VENV_DIR"
   "$PYTHON_BIN" -m venv "$VENV_DIR"
-  # shellcheck disable=SC1091
-  source "$VENV_DIR/bin/activate"
-  python -m pip --version >/dev/null 2>&1 || die "pip sigue no disponible después de recrear venv."
+  "$VENV_PYTHON" -m pip --version >/dev/null 2>&1 || die "pip sigue no disponible después de recrear venv."
 }
 
 mkdir -p "$LOG_DIR" "$WORK_DIR" "$OUT_DIR"
@@ -149,24 +170,28 @@ if [[ "$NO_LOG_FLAG" == "false" ]]; then
 fi
 
 info "Actualizando pip/setuptools/wheel..."
-python -m pip install -U pip setuptools wheel >/dev/null 2>&1 || warn "No se pudo actualizar pip (continuando)."
+"$VENV_PYTHON" -m pip install -U pip setuptools wheel >/dev/null 2>&1 || warn "No se pudo actualizar pip (continuando)."
 
-# -------------------- deps Python (incluye rich) --------------------
+# -------------------- deps Python --------------------
 if [[ ! -f "$REQ_FILE" ]]; then
   die "No se encontró $REQ_FILE. No puedo instalar dependencias."
 fi
 
-if [[ "$FORCE_INSTALL" == "true" ]]; then
-  info "Reinstalando dependencias (--force-install)..."
-  python -m pip install --force-reinstall -r "$REQ_FILE"
+if [[ "$FORCE_INSTALL" == "true" || "$REBUILD_VENV" == "true" ]] || needs_python_deps_install; then
+  if [[ "$FORCE_INSTALL" == "true" ]]; then
+    info "Reinstalando dependencias (--force-install)..."
+    "$VENV_PYTHON" -m pip install --force-reinstall -r "$REQ_FILE"
+  else
+    info "Instalando/verificando dependencias..."
+    "$VENV_PYTHON" -m pip install -r "$REQ_FILE"
+  fi
+  write_requirements_stamp
 else
-  info "Instalando/verificando dependencias..."
-  python -m pip install -r "$REQ_FILE"
+  info "Dependencias Python al día; se omite instalación."
 fi
 
-# Validaciones: rich y faster_whisper
-python -c "import rich; from rich.console import Console" >/dev/null 2>&1 || die "rich no quedó instalado. Revisa pip output arriba."
-python -c "import faster_whisper" >/dev/null 2>&1 || die "faster-whisper no quedó instalado. Revisa pip output arriba."
+"$VENV_PYTHON" -c "import rich; from rich.console import Console" >/dev/null 2>&1 || die "rich no quedó instalado. Revisa pip output arriba."
+"$VENV_PYTHON" -c "import faster_whisper" >/dev/null 2>&1 || die "faster-whisper no quedó instalado. Revisa pip output arriba."
 ok "Dependencias OK (rich + faster-whisper)."
 
 # -------------------- entrypoint --------------------
@@ -179,6 +204,5 @@ else
   die "No encuentro transcriptor.py (busqué en ./transcriptor.py y ./src/transcriptor.py)."
 fi
 
-
 ok "Entorno listo. Ejecutando transcriptor..."
-exec python "$ENTRYPOINT" "${ARGS[@]}"
+exec "$VENV_PYTHON" "$ENTRYPOINT" "${ARGS[@]}"

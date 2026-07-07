@@ -1,5 +1,6 @@
 import argparse
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.diarization_utils import diarize_light, review_diarization_interactive, speaker_label
+from src.state_utils import config_signature, load_state, resolve_audio_path, save_state
 from src.transcriptor import (
     audio_needs_normalization,
     normalize_compute_type,
@@ -48,10 +51,8 @@ class TranscriptorValidationTests(unittest.TestCase):
             chunk_s=45,
             overlap_s=0.4,
             beam=1,
-            replacements_json="",
             diarize=False,
             num_speakers=2,
-            merge_gap_s=0.8,
             turn_gap_s=1.2,
             force_turn_max_s=30.0,
         )
@@ -62,6 +63,71 @@ class TranscriptorValidationTests(unittest.TestCase):
         answers = iter(["quizas", "s"])
         with patch("src.transcriptor.prompt", side_effect=lambda msg, default=None: next(answers)):
             self.assertTrue(prompt_bool("Confirmar", True))
+
+
+class StateUtilsTests(unittest.TestCase):
+    def test_resolve_audio_path_strips_quotes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio = Path(tmpdir) / "audio.mp3"
+            audio.write_text("fake", encoding="utf-8")
+            resolved = resolve_audio_path(f'"{audio}"')
+            self.assertEqual(resolved, str(audio.resolve()))
+
+    def test_save_and_load_state_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            payload = {"completed_chunks": [1, 2], "config_sig": "abc"}
+            save_state(str(state_path), payload)
+            self.assertEqual(load_state(str(state_path)), payload)
+
+    def test_load_state_returns_empty_dict_for_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state.json"
+            state_path.write_text("{invalid", encoding="utf-8")
+            self.assertEqual(load_state(str(state_path)), {})
+
+    def test_config_signature_is_stable_for_same_content(self) -> None:
+        a = {"x": 1, "y": 2}
+        b = {"y": 2, "x": 1}
+        self.assertEqual(config_signature(a), config_signature(b))
+
+
+class DiarizationUtilsTests(unittest.TestCase):
+    def test_speaker_label_supports_letters_and_overflow(self) -> None:
+        self.assertEqual(speaker_label(0), "Participante A")
+        self.assertEqual(speaker_label(26), "Participante S27")
+
+    def test_diarize_light_switches_speaker_on_gap(self) -> None:
+        segments = [
+            {"start": 0.0, "end": 1.0, "text": "hola"},
+            {"start": 3.0, "end": 4.0, "text": "mundo"},
+        ]
+        diarized = diarize_light(segments, num_speakers=2, turn_gap_s=1.0, force_turn_max_s=30.0)
+        self.assertEqual(diarized[0]["speaker"], "Participante A")
+        self.assertEqual(diarized[1]["speaker"], "Participante B")
+
+    def test_diarize_light_switches_speaker_on_long_turn(self) -> None:
+        segments = [
+            {"start": 0.0, "end": 3.0, "text": "uno"},
+            {"start": 3.1, "end": 6.2, "text": "dos"},
+        ]
+        diarized = diarize_light(segments, num_speakers=2, turn_gap_s=10.0, force_turn_max_s=2.0)
+        self.assertEqual(diarized[1]["speaker"], "Participante B")
+
+    def test_review_diarization_interactive_reassigns_speaker(self) -> None:
+        segments = [{"start": 0.0, "end": 1.0, "text": "hola", "speaker": "Participante A"}]
+        outputs = []
+        answers = iter(["2", "q"])
+        with patch("src.diarization_utils.sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = True
+            reviewed = review_diarization_interactive(
+                segments,
+                num_speakers=2,
+                printer=outputs.append,
+                input_func=lambda _: next(answers),
+            )
+        self.assertEqual(reviewed[0]["speaker"], "Participante B")
+        self.assertTrue(any("Revisión de diarización" in line for line in outputs))
 
 
 if __name__ == "__main__":

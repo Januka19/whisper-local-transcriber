@@ -14,18 +14,40 @@ Objetivo:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib
 import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from src.audio_utils import Chunk, normalize_to_wav_16k_mono, split_audio_fixed
+    from src.diarization_utils import diarize_light, review_diarization_interactive
+    from src.state_utils import config_signature, load_state, resolve_audio_path, save_state
+    from src.system_utils import (
+        Logger,
+        audio_needs_normalization,
+        ensure_ffmpeg,
+        now_stamp,
+        probe_audio_info,
+        safe_mkdir,
+    )
+except ModuleNotFoundError:
+    from audio_utils import Chunk, normalize_to_wav_16k_mono, split_audio_fixed
+    from diarization_utils import diarize_light, review_diarization_interactive
+    from state_utils import config_signature, load_state, resolve_audio_path, save_state
+    from system_utils import (
+        Logger,
+        audio_needs_normalization,
+        ensure_ffmpeg,
+        now_stamp,
+        probe_audio_info,
+        safe_mkdir,
+    )
 
 MIN_PYTHON = (3, 8)
 VALID_COMPUTE_TYPES = {"int8", "int16", "float16", "float32"}
@@ -126,6 +148,7 @@ def load_whisper_model(model_id: str, device: str, compute_type: str, cpu_thread
         num_workers=num_workers,
     )
 
+
 # -------------------- Defaults / Aliases --------------------
 DEFAULT_WORKDIR = "work"
 DEFAULT_OUTDIR = "salida"
@@ -164,10 +187,6 @@ DEFAULT_WORD_TIMESTAMPS = False
 DEFAULT_NORMALIZE = True
 DEFAULT_VAD_FILTER = True
 
-DEFAULT_POSTPROCESS = True
-DEFAULT_REMOVE_FILLERS = True
-DEFAULT_WRITE_CLEAN = True
-DEFAULT_MERGE_GAP_S = 0.8
 
 # Deduplicación (fronteras de chunk)
 DEDUP_WINDOW = 8
@@ -181,182 +200,9 @@ DEFAULT_TURN_GAP_S = 1.2
 DEFAULT_FORCE_TURN_MAX_S = 30.0
 DEFAULT_REVIEW_DIARIZATION = False
 
-DEFAULT_REPLACEMENTS = {r"\bCACA\b": "cacao", r"\bChocoOsama\b": "ChocoSama"}
-FILLER_PATTERNS = [
-    r"(?i)\b(eee+|mmm+|eh+|em+)\b",
-    r"(?i)\b(o sea)\b",
-    r"(?i)\b(este|esteee)\b",
-    r"(?i)\b(digo)\b",
-    r"(?i)\b(ok|okay)\b",
-    r"(?i)\b(ya|ajá)\b",
-]
-FILLER_REGEXES = [re.compile(p) for p in FILLER_PATTERNS]
 
 
-# -------------------- Tipos --------------------
-@dataclass(frozen=True)
-class Chunk:
-    idx: int
-    path: str
-    start_s: float
-    end_s: float
-
-
-# -------------------- Utilidades sistema --------------------
-def ensure_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        ui_print("❌ No se encontró ffmpeg/ffprobe en PATH.")
-        ui_print("   En Fedora: sudo dnf install -y ffmpeg-free ffmpeg-free-devel")
-        raise SystemExit(1)
-
-
-def run_cmd(cmd: List[str]) -> str:
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if p.returncode != 0:
-        raise RuntimeError(f"Comando falló: {' '.join(cmd)}\nSTDERR:\n{p.stderr}")
-    return (p.stdout or "").strip()
-
-
-def ffprobe_duration_seconds(path: str) -> float:
-    out = run_cmd([
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        path
-    ])
-    return float(out)
-
-
-def safe_mkdir(path: str) -> None:
-    Path(path).mkdir(parents=True, exist_ok=True)
-
-
-def now_stamp() -> str:
-    return time.strftime("%Y%m%d_%H%M%S")
-
-
-def probe_audio_info(path: str) -> Dict[str, Any]:
-    out = run_cmd([
-        "ffprobe", "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=sample_rate,channels",
-        "-of", "json",
-        path,
-    ])
-    try:
-        data = json.loads(out)
-    except Exception:
-        return {"sample_rate": 0, "channels": 0}
-
-    streams = data.get("streams") or []
-    if not streams:
-        return {"sample_rate": 0, "channels": 0}
-
-    stream = streams[0] or {}
-    return {
-        "sample_rate": int(stream.get("sample_rate") or 0),
-        "channels": int(stream.get("channels") or 0),
-    }
-
-
-def audio_needs_normalization(audio_info: Dict[str, Any]) -> bool:
-    sample_rate = int(audio_info.get("sample_rate") or 0)
-    channels = int(audio_info.get("channels") or 0)
-    return sample_rate != 16000 or channels != 1
-
-
-class Logger:
-    """Logger simple: archivo + consola, con timestamps consistentes."""
-    def __init__(self, log_path: str):
-        self.log_path = log_path
-        safe_mkdir(str(Path(log_path).parent))
-
-    def write(self, msg: str) -> None:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] {msg}\n"
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(line)
-        ui_print(msg)
-
-
-# -------------------- Audio: normalizar y chunkear --------------------
-def normalize_to_wav_16k_mono(input_audio: str, out_wav: str) -> None:
-    run_cmd([
-        "ffmpeg", "-y", "-i", input_audio,
-        "-ac", "1", "-ar", "16000", "-vn",
-        "-af", "highpass=f=80,volume=1.2",
-        out_wav
-    ])
-
-
-def split_audio_fixed(input_audio: str, chunks_dir: str, chunk_s: int, overlap_s: float, prefix: str) -> List[Chunk]:
-    safe_mkdir(chunks_dir)
-    dur = ffprobe_duration_seconds(input_audio)
-
-    step = float(chunk_s) - float(overlap_s)
-    if step <= 0:
-        raise ValueError("chunk_s debe ser mayor que overlap_s.")
-
-    chunks: List[Chunk] = []
-    idx = 0
-    t = 0.0
-
-    while t < dur:
-        start = max(0.0, t)
-        end = min(dur, t + chunk_s)
-        duration = end - start
-
-        out_path = str(Path(chunks_dir) / f"{prefix}_chunk_{idx:04d}.wav")
-        run_cmd([
-            "ffmpeg", "-y",
-            "-ss", str(start), "-i", input_audio,
-            "-t", str(duration),
-            "-ac", "1", "-ar", "16000", "-vn",
-            out_path
-        ])
-
-        chunks.append(Chunk(idx=idx, path=out_path, start_s=start, end_s=end))
-        idx += 1
-        t += step
-
-    return chunks
-
-
-# -------------------- Estado / Resume --------------------
-def resolve_audio_path(audio_arg: str) -> str:
-    if not audio_arg:
-        raise FileNotFoundError("Ruta de audio vacía.")
-    cleaned = audio_arg.strip().strip("'\"")
-    p = Path(cleaned).expanduser().resolve()
-    if not p.is_file():
-        raise FileNotFoundError(f"No se encontró el audio: {p}")
-    return str(p)
-
-
-def load_state(state_path: str) -> Dict[str, Any]:
-    if not os.path.exists(state_path):
-        return {}
-    try:
-        with open(state_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_state(state_path: str, state: Dict[str, Any]) -> None:
-    tmp = state_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, state_path)
-
-
-def config_signature(d: Dict[str, Any]) -> str:
-    """Firma estable de config para evitar reanudar con parámetros incompatibles."""
-    relevant = json.dumps(d, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return hashlib.sha1(relevant).hexdigest()
-
-
-# -------------------- Texto: normalización / dedupe / post --------------------
+# -------------------- Texto: dedupe --------------------
 def _norm_sim(s: str) -> str:
     s = (s or "").lower().strip()
     s = re.sub(r"\s+", " ", s)
@@ -403,196 +249,6 @@ def dedup_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             out.append(s)
             last_texts.append(txt)
 
-    return out
-
-
-def load_replacements(path: str) -> List[Tuple[re.Pattern, str]]:
-    reps: List[Tuple[re.Pattern, str]] = [(re.compile(k), v) for k, v in DEFAULT_REPLACEMENTS.items()]
-    if path and os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            user_map = json.load(f)
-
-        if isinstance(user_map, dict):
-            for k, v in user_map.items():
-                reps.append((re.compile(str(k)), str(v)))
-
-        elif isinstance(user_map, list):
-            for item in user_map:
-                if not isinstance(item, dict):
-                    continue
-                canon = str(item.get("canon", "")).strip()
-                variantes = item.get("variantes", [])
-                if not canon or not isinstance(variantes, list):
-                    continue
-                for var in variantes:
-                    var = str(var).strip()
-                    if var:
-                        reps.append((re.compile(rf"\b{re.escape(var)}\b"), canon))
-    return reps
-
-
-def clean_text_basic(text: str) -> str:
-    t = (text or "").strip()
-    if not t:
-        return ""
-    t = re.sub(r"\s+", " ", t)
-    t = re.sub(r"\s+([,.;:!?])", r"\1", t)
-    t = re.sub(r"([¿¡])\s+", r"\1", t)
-    return t.strip()
-
-
-def apply_replacements(text: str, reps: List[Tuple[re.Pattern, str]]) -> str:
-    t = text
-    for pat, repl in reps:
-        t = pat.sub(repl, t)
-    return t
-
-
-def remove_fillers(text: str) -> str:
-    t = text
-    for pat in FILLER_REGEXES:
-        t = pat.sub("", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    t = re.sub(r"\s+([,.;:!?])", r"\1", t)
-    return t
-
-
-def _should_merge(prev_text: str, gap_s: float, merge_gap_s: float) -> bool:
-    if gap_s > merge_gap_s:
-        return False
-    if prev_text.strip().endswith((".", "!", "?", "…")):
-        return False
-    return True
-
-
-def postprocess_segments(
-    segments: List[Dict[str, Any]],
-    reps: List[Tuple[re.Pattern, str]],
-    do_remove_fillers: bool,
-    merge_gap_s: float
-) -> List[Dict[str, Any]]:
-    cleaned: List[Dict[str, Any]] = []
-    for s in segments:
-        t = clean_text_basic(s.get("text", ""))
-        if not t:
-            continue
-        t = apply_replacements(t, reps)
-        if do_remove_fillers:
-            t = remove_fillers(t)
-        t = clean_text_basic(t)
-        if not t:
-            continue
-        s2 = dict(s)
-        s2["text"] = t
-        cleaned.append(s2)
-
-    if not cleaned:
-        return []
-
-    merged: List[Dict[str, Any]] = [cleaned[0]]
-    for cur in cleaned[1:]:
-        prev = merged[-1]
-        gap = float(cur["start"]) - float(prev["end"])
-        if _should_merge(prev.get("text", ""), gap, merge_gap_s):
-            prev["text"] = clean_text_basic(prev.get("text", "") + " " + cur.get("text", ""))
-            prev["end"] = cur["end"]
-        else:
-            merged.append(cur)
-
-    return merged
-
-
-# -------------------- Diarización ligera --------------------
-def speaker_label(i: int) -> str:
-    if 0 <= i < 26:
-        return f"Participante {chr(ord('A') + i)}"
-    return f"Participante S{i+1}"
-
-
-def diarize_light(segments: List[Dict[str, Any]], num_speakers: int, turn_gap_s: float, force_turn_max_s: float) -> List[Dict[str, Any]]:
-    if not segments:
-        return []
-    num_speakers = max(1, int(num_speakers))
-    turn_gap_s = max(0.0, float(turn_gap_s))
-    force_turn_max_s = max(1.0, float(force_turn_max_s))
-
-    out: List[Dict[str, Any]] = []
-    current = 0
-    turn_start = float(segments[0]["start"])
-    prev_end = float(segments[0]["end"])
-
-    first = dict(segments[0])
-    first["speaker"] = speaker_label(current)
-    out.append(first)
-
-    for s in segments[1:]:
-        start = float(s["start"])
-        end = float(s["end"])
-        gap = start - prev_end
-        turn_len = prev_end - turn_start
-
-        change = (gap >= turn_gap_s) or (turn_len >= force_turn_max_s)
-        if change:
-            current = (current + 1) % num_speakers
-            turn_start = start
-
-        s2 = dict(s)
-        s2["speaker"] = speaker_label(current)
-        out.append(s2)
-        prev_end = end
-
-    return out
-
-
-def review_diarization_interactive(segments: List[Dict[str, Any]], num_speakers: int) -> List[Dict[str, Any]]:
-    if not segments:
-        return segments
-
-    try:
-        if not sys.stdin or not sys.stdin.isatty():
-            ui_print("⚠️ Revisión solicitada pero no hay terminal interactivo; se omite.")
-            return segments
-    except Exception:
-        ui_print("⚠️ No pude validar TTY; se omite revisión para evitar bloqueo.")
-        return segments
-
-    num_speakers = max(1, int(num_speakers))
-    max_key = min(num_speakers, 9)
-
-    ui_print("\n=== Revisión de diarización (rápida) ===")
-    ui_print(f"Enter=mantener | 1..{max_key}=reasignar | b=atrás | q=salir\n")
-
-    out = [dict(s) for s in segments]
-    i = 0
-    while i < len(out):
-        s = out[i]
-        sp = s.get("speaker", "Participante A")
-        ui_print(f"[{i+1}/{len(out)}] {s['start']:.2f}s -> {s['end']:.2f}s | {sp}")
-        ui_print(f"  {s.get('text','')}\n")
-        try:
-            cmd = input(">> ").strip().lower()
-        except EOFError:
-            ui_print("\n⚠️ EOF — saliendo de revisión.")
-            break
-
-        if cmd == "":
-            i += 1
-            continue
-        if cmd == "q":
-            break
-        if cmd == "b":
-            i = max(0, i - 1)
-            continue
-        if cmd.isdigit():
-            k = int(cmd)
-            if 1 <= k <= num_speakers:
-                out[i]["speaker"] = speaker_label(k - 1)
-                i += 1
-                continue
-
-        ui_print("Comando no válido.\n")
-
-    ui_print("Revisión finalizada.\n")
     return out
 
 
@@ -695,10 +351,8 @@ def prompt(msg: str, default: Optional[str] = None) -> str:
     return s if s else (default if default is not None else "")
 
 
-def normalize_compute_type(value: str, *, allow_empty: bool = False) -> str:
+def normalize_compute_type(value: str) -> str:
     cleaned = (value or "").strip().lower()
-    if not cleaned and allow_empty:
-        return ""
     if cleaned not in VALID_COMPUTE_TYPES:
         raise ValueError("compute_type inválido. Usa: int8, int16, float16 o float32.")
     return cleaned
@@ -811,20 +465,6 @@ def assisted_args() -> argparse.Namespace:
         except ValueError as e:
             ui_print(f"  ↳ {e}")
 
-    post = prompt_bool("Post-procesar (y/n)", True)
-    remove_fillers = True
-    merge_gap_s = DEFAULT_MERGE_GAP_S
-    replacements_json = ""
-    write_clean = True
-    if post:
-        remove_fillers = prompt_bool("Quitar muletillas (y/n)", True)
-        merge_gap_s = prompt_float("Fusionar si gap ≤ (s)", DEFAULT_MERGE_GAP_S, 0.0, 10.0)
-        replacements_json = prompt("Ruta replacements.json (opcional)", "").strip()
-        if replacements_json and not os.path.exists(replacements_json):
-            ui_print("  ↳ No encontré ese JSON; continúo sin replacements externos.")
-            replacements_json = ""
-        write_clean = prompt_bool("Escribir salida limpia adicional (y/n)", True)
-
     diarize = prompt_bool("Diarización ligera (y/n)", True)
     num_speakers = DEFAULT_NUM_SPEAKERS
     turn_gap_s = DEFAULT_TURN_GAP_S
@@ -855,8 +495,6 @@ def assisted_args() -> argparse.Namespace:
         beam=beam, word_timestamps=False,
         normalize=normalize, resume=resume,
         vad_filter=vad_filter,
-        postprocess=post, replacements_json=replacements_json,
-        merge_gap_s=merge_gap_s, remove_fillers=remove_fillers, write_clean=write_clean,
         diarize=diarize, num_speakers=num_speakers, turn_gap_s=turn_gap_s,
         force_turn_max_s=force_turn_max_s, review_diarization=review_diar,
         force_reuse_chunks=force_reuse_chunks,
@@ -870,7 +508,7 @@ def assisted_args() -> argparse.Namespace:
     ui_print(f"- Fallback: {args.fallback_model or '(none)'}")
     ui_print(f"- Idioma: {args.language} | VAD: {'Sí' if args.vad_filter else 'No'}")
     ui_print(f"- Chunk: {args.chunk_s}s | overlap: {args.overlap_s}s | beam: {args.beam}")
-    ui_print(f"- Post: {'Sí' if args.postprocess else 'No'} | Diarize: {'Sí' if args.diarize else 'No'}")
+    ui_print(f"- Diarize: {'Sí' if args.diarize else 'No'}")
 
     ok_go = Confirm.ask("¿Iniciar transcripción?", default=True) if (RICH_AVAILABLE and console) else prompt_bool("¿Iniciar? (y/n)", True)
     if not ok_go:
@@ -904,14 +542,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("cpu_threads debe ser >= 0")
     if args.num_workers < 1:
         raise ValueError("num_workers debe ser >= 1")
-    if args.merge_gap_s < 0:
-        raise ValueError("merge_gap_s debe ser >= 0")
     if args.turn_gap_s <= 0:
         raise ValueError("turn_gap_s debe ser > 0")
     if args.force_turn_max_s <= 0:
         raise ValueError("force_turn_max_s debe ser > 0")
-    if args.replacements_json and not Path(args.replacements_json).is_file():
-        raise ValueError("replacements_json no existe o no es un archivo")
     if args.diarize and (args.num_speakers < 1 or args.num_speakers > 9):
         raise ValueError("num_speakers debe estar entre 1 y 9")
 
@@ -919,7 +553,7 @@ def validate_args(args: argparse.Namespace) -> None:
 # -------------------- Pipeline principal --------------------
 def run_pipeline(args: argparse.Namespace) -> None:
     validate_args(args)
-    ensure_ffmpeg()
+    ensure_ffmpeg(ui_print)
 
     safe_mkdir(args.workdir)
     safe_mkdir(args.outdir)
@@ -929,7 +563,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     audio_name = Path(audio_path).stem
 
     log_path = str(Path(args.logdir) / f"{audio_name}_{now_stamp()}.log")
-    log = Logger(log_path)
+    log = Logger(log_path, ui_print)
 
     # Paths
     state_path = str(Path(args.workdir) / f"{audio_name}_estado.json")
@@ -951,7 +585,6 @@ def run_pipeline(args: argparse.Namespace) -> None:
     log.write(f"🧵 CPU threads={args.cpu_threads} | workers={args.num_workers}")
     log.write(f"🧠 Fallback: {args.fallback_model or '(none)'} | compute={args.fallback_compute_type or '(none)'}")
     log.write(f"⚙️ chunk={args.chunk_s}s overlap={args.overlap_s}s beam={args.beam} normalize={bool(args.normalize)} resume={bool(args.resume)} vad={bool(args.vad_filter)}")
-    log.write(f"🧼 postprocess={bool(args.postprocess)} remove_fillers={bool(args.remove_fillers)} merge_gap={args.merge_gap_s}s replacements={args.replacements_json or '(default)'}")
     log.write(f"🗣️ diarize={bool(args.diarize)} speakers={getattr(args,'num_speakers',0)} turn_gap={getattr(args,'turn_gap_s',0)} force_turn_max={getattr(args,'force_turn_max_s',0)} review={getattr(args,'review_diarization',False)}")
     log.write(f"🧾 Log file: {log_path}")
 
@@ -1138,7 +771,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
                 def persist_failure(err: str) -> None:
                     failed.add(ch.idx)
-                    state["failed_chunks"] = sorted(list(failed))
+                    state["failed_chunks"] = sorted(failed)
                     save_state(state_path, state)
                     log.write(f"⚠️ Fallido: chunk {ch.idx} | {err}")
 
@@ -1187,7 +820,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                         f.write(json.dumps(sg, ensure_ascii=False) + "\n")
 
                 completed.add(ch.idx)
-                state["completed_chunks"] = sorted(list(completed))
+                state["completed_chunks"] = sorted(completed)
                 save_state(state_path, state)
 
                 log.write(f"✅ Chunk {ch.idx} OK ({len(segs_global)} segs)")
@@ -1220,18 +853,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
     segments_global.sort(key=lambda x: (x["start"], x["end"]))
     segments_global = dedup_segments(segments_global)
 
-    # Postproceso
-    segments_clean = segments_global
-    if args.postprocess:
-        reps = load_replacements(args.replacements_json)
-        segments_clean = postprocess_segments(segments_global, reps, bool(args.remove_fillers), float(args.merge_gap_s))
-
     # Diarización
-    segments_for_diar = segments_clean if args.postprocess else segments_global
+    segments_for_diar = segments_global
     if args.diarize:
         diar = diarize_light(segments_for_diar, int(args.num_speakers), float(args.turn_gap_s), float(args.force_turn_max_s))
         if getattr(args, "review_diarization", False):
-            diar = review_diarization_interactive(diar, int(args.num_speakers))
+            diar = review_diarization_interactive(diar, int(args.num_speakers), ui_print)
         segments_final = diar
     else:
         segments_final = segments_for_diar
@@ -1267,16 +894,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
     log.write(f"TXT:  {out_txt}")
     log.write(f"JSON: {out_json}")
     if failed:
-        log.write(f"⚠️ Chunks fallidos: {sorted(list(failed))}")
+        log.write(f"⚠️ Chunks fallidos: {sorted(failed)}")
     log.write(f"Tiempo total: {(t1 - t0)/60:.1f} min\n")
-
-    if args.write_clean and args.postprocess:
-        out_txt_clean = str(Path(args.outdir) / f"{audio_name}_transcripcion_limpia.txt")
-        out_json_clean = str(Path(args.outdir) / f"{audio_name}_transcripcion_limpia.json")
-        meta_clean = dict(meta)
-        meta_clean["note"] = "Salida limpia (sin diarización), lista para análisis."
-        write_outputs(segments_clean, meta_clean, out_txt_clean, out_json_clean)
-        log.write(f"🧼 Limpia: {out_txt_clean} y {out_json_clean}")
 
     if getattr(args, "clean", False):
         clean_workspace(args.workdir, args.logdir, audio_name)
@@ -1309,12 +928,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--normalize", action=BooleanOptionalAction, default=DEFAULT_NORMALIZE)
     p.add_argument("--resume", action=BooleanOptionalAction, default=True)
     p.add_argument("--vad_filter", action=BooleanOptionalAction, default=DEFAULT_VAD_FILTER)
-
-    p.add_argument("--postprocess", action=BooleanOptionalAction, default=DEFAULT_POSTPROCESS)
-    p.add_argument("--replacements_json", default="")
-    p.add_argument("--merge_gap_s", type=float, default=DEFAULT_MERGE_GAP_S)
-    p.add_argument("--remove_fillers", action=BooleanOptionalAction, default=DEFAULT_REMOVE_FILLERS)
-    p.add_argument("--write_clean", action=BooleanOptionalAction, default=DEFAULT_WRITE_CLEAN)
 
     p.add_argument("--diarize", action=BooleanOptionalAction, default=DEFAULT_DIARIZE)
     p.add_argument("--num_speakers", type=int, default=DEFAULT_NUM_SPEAKERS)

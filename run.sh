@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# whisper-local-transcriber :: robust runner (Release 3)
+# whisper-local-transcriber :: (Release 3)
 #
 # Uso:
 #   ./run.sh [--rebuild-venv] [--force-install] [--system-deps] [--no-log] [ARGS...]

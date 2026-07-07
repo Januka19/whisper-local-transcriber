@@ -14,8 +14,8 @@ Objetivo:
 from __future__ import annotations
 
 import argparse
-from argparse import BooleanOptionalAction
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -27,18 +27,61 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+try:
+    from argparse import BooleanOptionalAction
+except ImportError:
+    class BooleanOptionalAction(argparse.Action):
+        def __init__(self, option_strings: List[str], dest: str, default: Optional[bool] = None, **kwargs: Any) -> None:
+            if not option_strings:
+                raise ValueError("BooleanOptionalAction requiere al menos un flag")
+            opts = []
+            for option_string in option_strings:
+                opts.append(option_string)
+                if option_string.startswith("--"):
+                    opts.append("--no-" + option_string[2:])
+            super().__init__(option_strings=opts, dest=dest, nargs=0, default=default, **kwargs)
+
+        def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any, option_string: Optional[str] = None) -> None:
+            setattr(namespace, self.dest, not str(option_string).startswith("--no-"))
+
 # -------------------- UI opcional (rich) --------------------
 RICH_AVAILABLE = False
 console = None
-try:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
+Panel = None
+Prompt = None
+Confirm = None
+IntPrompt = None
+FloatPrompt = None
+
+
+def init_rich() -> None:
+    global RICH_AVAILABLE, console, Panel, Prompt, Confirm, IntPrompt, FloatPrompt
+    if console is not None:
+        return
+    try:
+        rich_console = importlib.import_module("rich.console")
+        rich_panel = importlib.import_module("rich.panel")
+        rich_prompt = importlib.import_module("rich.prompt")
+    except Exception:
+        RICH_AVAILABLE = False
+        console = None
+        Panel = None
+        Prompt = None
+        Confirm = None
+        IntPrompt = None
+        FloatPrompt = None
+        return
+
     RICH_AVAILABLE = True
-    console = Console()
-except Exception:
-    RICH_AVAILABLE = False
-    console = None
+    Panel = rich_panel.Panel
+    Prompt = rich_prompt.Prompt
+    Confirm = rich_prompt.Confirm
+    IntPrompt = rich_prompt.IntPrompt
+    FloatPrompt = rich_prompt.FloatPrompt
+    console = rich_console.Console()
+
+
+init_rich()
 
 
 def ui_print(msg: str = "") -> None:
@@ -645,6 +688,46 @@ def prompt(msg: str, default: Optional[str] = None) -> str:
     return s if s else (default if default is not None else "")
 
 
+def normalize_compute_type(value: str, *, allow_empty: bool = False) -> str:
+    cleaned = (value or "").strip().lower()
+    if not cleaned and allow_empty:
+        return ""
+    if cleaned not in {"int8", "int16", "float16", "float32"}:
+        raise ValueError("compute_type inválido. Usa: int8, int16, float16 o float32.")
+    return cleaned
+
+
+def normalize_language(value: str) -> str:
+    cleaned = (value or "").strip().lower()
+    if not cleaned:
+        raise ValueError("language no puede estar vacío.")
+    if cleaned == "auto":
+        return cleaned
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2,3})?", cleaned):
+        raise ValueError("language inválido. Usa 'auto' o un código como 'es', 'en' o 'pt-br'.")
+    return cleaned
+
+
+def normalize_non_empty_text(value: str, field_name: str) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} no puede estar vacío.")
+    return cleaned
+
+
+def prompt_bool(msg: str, default: bool = True) -> bool:
+    default_text = "y" if default else "n"
+    valid_true = {"y", "yes", "s", "si", "sí"}
+    valid_false = {"n", "no"}
+    while True:
+        raw = prompt(msg, default_text).strip().lower()
+        if raw in valid_true:
+            return True
+        if raw in valid_false:
+            return False
+        ui_print("  ↳ Responde y/n.")
+
+
 def prompt_int(msg: str, default: int, min_v: int = 1, max_v: int = 10000) -> int:
     while True:
         try:
@@ -684,19 +767,24 @@ def assisted_args() -> argparse.Namespace:
         except Exception as e:
             ui_print(f"  ↳ {e}")
 
-    model = prompt("Modelo (ej: turbo-int8 / medium / HF id)", DEFAULT_MODEL).strip()
-    model = canonical_model_id(model)
+    model = canonical_model_id(normalize_non_empty_text(prompt("Modelo (ej: turbo-int8 / medium / HF id)", DEFAULT_MODEL), "model"))
 
-    compute = prompt("compute_type (int8/int16/float16/float32)", DEFAULT_COMPUTE_TYPE).strip().lower()
-    if compute not in {"int8", "int16", "float16", "float32"}:
-        compute = DEFAULT_COMPUTE_TYPE
+    while True:
+        try:
+            compute = normalize_compute_type(prompt("compute_type (int8/int16/float16/float32)", DEFAULT_COMPUTE_TYPE))
+            break
+        except ValueError as e:
+            ui_print(f"  ↳ {e}")
 
     fallback = prompt("Fallback model (vacío para none)", DEFAULT_FALLBACK_MODEL).strip()
     fallback = canonical_model_id(fallback) if fallback else ""
 
-    fb_compute = prompt("compute_type fallback", DEFAULT_FALLBACK_COMPUTE_TYPE).strip().lower()
-    if fb_compute not in {"int8", "int16", "float16", "float32"}:
-        fb_compute = DEFAULT_FALLBACK_COMPUTE_TYPE
+    while True:
+        try:
+            fb_compute = normalize_compute_type(prompt("compute_type fallback", DEFAULT_FALLBACK_COMPUTE_TYPE))
+            break
+        except ValueError as e:
+            ui_print(f"  ↳ {e}")
 
     cpu_threads = prompt_int("CPU threads (0=auto)", DEFAULT_CPU_THREADS, 0, 256)
     num_workers = prompt_int("Workers del modelo", DEFAULT_NUM_WORKERS, 1, 16)
@@ -705,27 +793,32 @@ def assisted_args() -> argparse.Namespace:
     overlap_s = prompt_float("Overlap (seg)", DEFAULT_OVERLAP_S, 0.0, float(chunk_s) - 0.1)
     beam = prompt_int("Beam (1 recomendado)", DEFAULT_BEAM, 1, 5)
 
-    normalize = prompt("Normalizar a WAV 16k mono (y/n)", "y").lower().startswith("y")
-    resume = prompt("Reanudar si existe estado (y/n)", "y").lower().startswith("y")
-    vad_filter = prompt("VAD filter (recomendado) (y/n)", "y").lower().startswith("y")
+    normalize = prompt_bool("Normalizar a WAV 16k mono (y/n)", True)
+    resume = prompt_bool("Reanudar si existe estado (y/n)", True)
+    vad_filter = prompt_bool("VAD filter (recomendado) (y/n)", True)
 
-    language = prompt("Idioma ('es' / 'en' / 'auto')", DEFAULT_LANGUAGE).strip() or DEFAULT_LANGUAGE
+    while True:
+        try:
+            language = normalize_language(prompt("Idioma ('es' / 'en' / 'auto')", DEFAULT_LANGUAGE))
+            break
+        except ValueError as e:
+            ui_print(f"  ↳ {e}")
 
-    post = prompt("Post-procesar (y/n)", "y").lower().startswith("y")
+    post = prompt_bool("Post-procesar (y/n)", True)
     remove_fillers = True
     merge_gap_s = DEFAULT_MERGE_GAP_S
     replacements_json = ""
     write_clean = True
     if post:
-        remove_fillers = prompt("Quitar muletillas (y/n)", "y").lower().startswith("y")
+        remove_fillers = prompt_bool("Quitar muletillas (y/n)", True)
         merge_gap_s = prompt_float("Fusionar si gap ≤ (s)", DEFAULT_MERGE_GAP_S, 0.0, 10.0)
         replacements_json = prompt("Ruta replacements.json (opcional)", "").strip()
         if replacements_json and not os.path.exists(replacements_json):
             ui_print("  ↳ No encontré ese JSON; continúo sin replacements externos.")
             replacements_json = ""
-        write_clean = prompt("Escribir salida limpia adicional (y/n)", "y").lower().startswith("y")
+        write_clean = prompt_bool("Escribir salida limpia adicional (y/n)", True)
 
-    diarize = prompt("Diarización ligera (y/n)", "y").lower().startswith("y")
+    diarize = prompt_bool("Diarización ligera (y/n)", True)
     num_speakers = DEFAULT_NUM_SPEAKERS
     turn_gap_s = DEFAULT_TURN_GAP_S
     force_turn_max_s = DEFAULT_FORCE_TURN_MAX_S
@@ -734,14 +827,14 @@ def assisted_args() -> argparse.Namespace:
         num_speakers = prompt_int("Número de participantes", DEFAULT_NUM_SPEAKERS, 1, 9)
         turn_gap_s = prompt_float("Cambio de turno si pausa ≥ (s)", DEFAULT_TURN_GAP_S, 0.1, 10.0)
         force_turn_max_s = prompt_float("Forzar cambio si bloque ≥ (s)", DEFAULT_FORCE_TURN_MAX_S, 5.0, 600.0)
-        review_diar = prompt("Revisar diarización al final (y/n)", "n").lower().startswith("y")
+        review_diar = prompt_bool("Revisar diarización al final (y/n)", False)
 
-    workdir = prompt("Carpeta work", DEFAULT_WORKDIR)
-    outdir = prompt("Carpeta salida", DEFAULT_OUTDIR)
-    logdir = prompt("Carpeta logs", DEFAULT_LOGDIR)
+    workdir = normalize_non_empty_text(prompt("Carpeta work", DEFAULT_WORKDIR), "workdir")
+    outdir = normalize_non_empty_text(prompt("Carpeta salida", DEFAULT_OUTDIR), "outdir")
+    logdir = normalize_non_empty_text(prompt("Carpeta logs", DEFAULT_LOGDIR), "logdir")
 
-    force_reuse_chunks = prompt("Forzar reutilización chunks (y/n)", "n").lower().startswith("y")
-    clean = prompt("Eliminar intermedios al final (--clean) (y/n)", "n").lower().startswith("y")
+    force_reuse_chunks = prompt_bool("Forzar reutilización chunks (y/n)", False)
+    clean = prompt_bool("Eliminar intermedios al final (--clean) (y/n)", False)
 
     args = argparse.Namespace(
         audio=a,
@@ -772,7 +865,7 @@ def assisted_args() -> argparse.Namespace:
     ui_print(f"- Chunk: {args.chunk_s}s | overlap: {args.overlap_s}s | beam: {args.beam}")
     ui_print(f"- Post: {'Sí' if args.postprocess else 'No'} | Diarize: {'Sí' if args.diarize else 'No'}")
 
-    ok_go = Confirm.ask("¿Iniciar transcripción?", default=True) if (RICH_AVAILABLE and console) else (prompt("¿Iniciar? [S/n]", "S").lower() != "n")
+    ok_go = Confirm.ask("¿Iniciar transcripción?", default=True) if (RICH_AVAILABLE and console) else prompt_bool("¿Iniciar? (y/n)", True)
     if not ok_go:
         ui_print("Ejecución cancelada.")
         raise SystemExit(0)
@@ -782,6 +875,16 @@ def assisted_args() -> argparse.Namespace:
 
 # -------------------- Validación args --------------------
 def validate_args(args: argparse.Namespace) -> None:
+    args.model = canonical_model_id(normalize_non_empty_text(args.model, "model"))
+    args.compute_type = normalize_compute_type(args.compute_type)
+    args.language = normalize_language(args.language)
+    args.workdir = normalize_non_empty_text(args.workdir, "workdir")
+    args.outdir = normalize_non_empty_text(args.outdir, "outdir")
+    args.logdir = normalize_non_empty_text(args.logdir, "logdir")
+    args.audio = normalize_non_empty_text(args.audio, "audio")
+    args.fallback_model = canonical_model_id((args.fallback_model or "").strip()) if args.fallback_model else ""
+    args.fallback_compute_type = normalize_compute_type(args.fallback_compute_type)
+
     if args.chunk_s <= 0:
         raise ValueError("chunk_s debe ser > 0")
     if args.overlap_s < 0:
@@ -790,16 +893,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("overlap_s debe ser menor que chunk_s")
     if args.beam < 1 or args.beam > 5:
         raise ValueError("beam debe estar entre 1 y 5")
-    if args.compute_type not in {"int8", "int16", "float16", "float32"}:
-        raise ValueError("compute_type inválido")
     if args.cpu_threads < 0:
         raise ValueError("cpu_threads debe ser >= 0")
     if args.num_workers < 1:
         raise ValueError("num_workers debe ser >= 1")
-    if args.fallback_model and args.fallback_compute_type not in {"int8", "int16", "float16", "float32"}:
-        raise ValueError("fallback_compute_type inválido")
-    if args.replacements_json and not os.path.exists(args.replacements_json):
-        raise ValueError("replacements_json no existe")
+    if args.merge_gap_s < 0:
+        raise ValueError("merge_gap_s debe ser >= 0")
+    if args.turn_gap_s <= 0:
+        raise ValueError("turn_gap_s debe ser > 0")
+    if args.force_turn_max_s <= 0:
+        raise ValueError("force_turn_max_s debe ser > 0")
+    if args.replacements_json and not Path(args.replacements_json).is_file():
+        raise ValueError("replacements_json no existe o no es un archivo")
     if args.diarize and (args.num_speakers < 1 or args.num_speakers > 9):
         raise ValueError("num_speakers debe estar entre 1 y 9")
 
@@ -989,14 +1094,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
     task_chunks = None
     try:
         if use_progress:
-            from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("{task.description}"),
-                BarColumn(),
-                TextColumn("{task.completed}/{task.total} chunks"),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
+            rich_progress = importlib.import_module("rich.progress")
+            progress = rich_progress.Progress(
+                rich_progress.SpinnerColumn(),
+                rich_progress.TextColumn("{task.description}"),
+                rich_progress.BarColumn(),
+                rich_progress.TextColumn("{task.completed}/{task.total} chunks"),
+                rich_progress.TimeElapsedColumn(),
+                rich_progress.TimeRemainingColumn(),
                 console=console,
             )
             progress.__enter__()

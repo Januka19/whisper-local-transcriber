@@ -62,11 +62,19 @@ def ui_header() -> None:
 
 
 # -------------------- Dependencia principal --------------------
-try:
-    from faster_whisper import WhisperModel
-except Exception:
-    ui_print("❌ ERROR: No se pudo importar faster_whisper. Instala deps")
-    raise SystemExit(1)
+def load_whisper_model(model_id: str, device: str, compute_type: str, cpu_threads: int, num_workers: int) -> Any:
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as exc:
+        ui_print("❌ ERROR: No se pudo importar faster_whisper. Instala deps")
+        raise SystemExit(1) from exc
+    return WhisperModel(
+        model_id,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+        num_workers=num_workers,
+    )
 
 # -------------------- Defaults / Aliases --------------------
 DEFAULT_WORKDIR = "work"
@@ -95,6 +103,8 @@ DEFAULT_FALLBACK_MODEL = "medium"          # fallback más liviano que large tur
 DEFAULT_DEVICE = "cpu"
 DEFAULT_COMPUTE_TYPE = "int8"
 DEFAULT_FALLBACK_COMPUTE_TYPE = "int8"
+DEFAULT_CPU_THREADS = 0
+DEFAULT_NUM_WORKERS = 1
 DEFAULT_LANGUAGE = "es"
 
 DEFAULT_CHUNK_S = 45
@@ -130,6 +140,7 @@ FILLER_PATTERNS = [
     r"(?i)\b(ok|okay)\b",
     r"(?i)\b(ya|ajá)\b",
 ]
+FILLER_REGEXES = [re.compile(p) for p in FILLER_PATTERNS]
 
 
 # -------------------- Tipos --------------------
@@ -389,8 +400,8 @@ def apply_replacements(text: str, reps: List[Tuple[re.Pattern, str]]) -> str:
 
 def remove_fillers(text: str) -> str:
     t = text
-    for pat in FILLER_PATTERNS:
-        t = re.sub(pat, "", t)
+    for pat in FILLER_REGEXES:
+        t = pat.sub("", t)
     t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"\s+([,.;:!?])", r"\1", t)
     return t
@@ -545,7 +556,7 @@ def canonical_model_id(model: str) -> str:
 
 
 def transcribe_one_chunk(
-    model: WhisperModel,
+    model: Any,
     chunk_path: str,
     language: Optional[str],
     beam_size: int,
@@ -687,6 +698,9 @@ def assisted_args() -> argparse.Namespace:
     if fb_compute not in {"int8", "int16", "float16", "float32"}:
         fb_compute = DEFAULT_FALLBACK_COMPUTE_TYPE
 
+    cpu_threads = prompt_int("CPU threads (0=auto)", DEFAULT_CPU_THREADS, 0, 256)
+    num_workers = prompt_int("Workers del modelo", DEFAULT_NUM_WORKERS, 1, 16)
+
     chunk_s = prompt_int("Chunk (seg)", DEFAULT_CHUNK_S, 10, 600)
     overlap_s = prompt_float("Overlap (seg)", DEFAULT_OVERLAP_S, 0.0, float(chunk_s) - 0.1)
     beam = prompt_int("Beam (1 recomendado)", DEFAULT_BEAM, 1, 5)
@@ -734,6 +748,7 @@ def assisted_args() -> argparse.Namespace:
         workdir=workdir, outdir=outdir, logdir=logdir,
         model=model, compute_type=compute,
         fallback_model=fallback, fallback_compute_type=fb_compute,
+        cpu_threads=cpu_threads, num_workers=num_workers,
         language=language,
         device=DEFAULT_DEVICE,
         chunk_s=chunk_s, overlap_s=overlap_s,
@@ -751,6 +766,7 @@ def assisted_args() -> argparse.Namespace:
     ui_print("\nResumen:")
     ui_print(f"- Audio: {args.audio}")
     ui_print(f"- Modelo: {args.model} (compute: {args.compute_type})")
+    ui_print(f"- CPU threads: {args.cpu_threads} | workers: {args.num_workers}")
     ui_print(f"- Fallback: {args.fallback_model or '(none)'}")
     ui_print(f"- Idioma: {args.language} | VAD: {'Sí' if args.vad_filter else 'No'}")
     ui_print(f"- Chunk: {args.chunk_s}s | overlap: {args.overlap_s}s | beam: {args.beam}")
@@ -776,6 +792,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("beam debe estar entre 1 y 5")
     if args.compute_type not in {"int8", "int16", "float16", "float32"}:
         raise ValueError("compute_type inválido")
+    if args.cpu_threads < 0:
+        raise ValueError("cpu_threads debe ser >= 0")
+    if args.num_workers < 1:
+        raise ValueError("num_workers debe ser >= 1")
     if args.fallback_model and args.fallback_compute_type not in {"int8", "int16", "float16", "float32"}:
         raise ValueError("fallback_compute_type inválido")
     if args.replacements_json and not os.path.exists(args.replacements_json):
@@ -816,6 +836,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # Log config
     log.write(f"📌 Audio: {audio_path}")
     log.write(f"🧠 Modelo: {args.model} | compute={args.compute_type} | device={args.device}")
+    log.write(f"🧵 CPU threads={args.cpu_threads} | workers={args.num_workers}")
     log.write(f"🧠 Fallback: {args.fallback_model or '(none)'} | compute={args.fallback_compute_type or '(none)'}")
     log.write(f"⚙️ chunk={args.chunk_s}s overlap={args.overlap_s}s beam={args.beam} normalize={bool(args.normalize)} resume={bool(args.resume)} vad={bool(args.vad_filter)}")
     log.write(f"🧼 postprocess={bool(args.postprocess)} remove_fillers={bool(args.remove_fillers)} merge_gap={args.merge_gap_s}s replacements={args.replacements_json or '(default)'}")
@@ -832,6 +853,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "fallback_model": args.fallback_model,
         "compute_type": args.compute_type,
         "fallback_compute_type": args.fallback_compute_type if args.fallback_model else "",
+        "cpu_threads": args.cpu_threads,
+        "num_workers": args.num_workers,
         "language": args.language,
         "chunk_s": args.chunk_s,
         "overlap_s": args.overlap_s,
@@ -949,12 +972,10 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     # Cargar modelos
     log.write("🧠 Cargando modelo principal...")
-    model_main = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
+    model_main = load_whisper_model(args.model, args.device, args.compute_type, args.cpu_threads, args.num_workers)
 
     model_fallback = None
-    if args.fallback_model and args.fallback_model != args.model:
-        log.write("🧠 Cargando fallback...")
-        model_fallback = WhisperModel(args.fallback_model, device=args.device, compute_type=args.fallback_compute_type)
+    fallback_available = bool(args.fallback_model and args.fallback_model != args.model)
 
     completed = set(state.get("completed_chunks", []))
     failed = set(state.get("failed_chunks", []))
@@ -1016,9 +1037,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
                     )
                 except Exception as e:
                     log.write(f"⚠️ Falló con principal: {e}")
-                    if model_fallback is None:
+                    if not fallback_available:
                         persist_failure(str(e))
                         continue
+                    if model_fallback is None:
+                        log.write("🧠 Cargando fallback...")
+                        model_fallback = load_whisper_model(
+                            args.fallback_model,
+                            args.device,
+                            args.fallback_compute_type,
+                            args.cpu_threads,
+                            args.num_workers,
+                        )
                     log.write("🔁 Reintentando con fallback...")
                     try:
                         local_segments = transcribe_one_chunk(
@@ -1101,6 +1131,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "fallback_model": args.fallback_model,
         "compute_type": args.compute_type,
         "fallback_compute_type": args.fallback_compute_type if args.fallback_model else "",
+        "cpu_threads": args.cpu_threads,
+        "num_workers": args.num_workers,
         "language": args.language,
         "device": args.device,
         "chunk_s": args.chunk_s,
@@ -1152,6 +1184,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default=DEFAULT_DEVICE, choices=["cpu"], help="Este release prioriza CPU.")
     p.add_argument("--compute_type", default=DEFAULT_COMPUTE_TYPE, choices=["int8", "int16", "float16", "float32"])
     p.add_argument("--fallback_compute_type", default=DEFAULT_FALLBACK_COMPUTE_TYPE, choices=["int8", "int16", "float16", "float32"])
+    p.add_argument("--cpu_threads", type=int, default=DEFAULT_CPU_THREADS, help="Threads CPU para faster-whisper (0=auto).")
+    p.add_argument("--num_workers", type=int, default=DEFAULT_NUM_WORKERS, help="Workers internos del modelo.")
 
     p.add_argument("--language", default=DEFAULT_LANGUAGE, help="Idioma: es/en/auto")
     p.add_argument("--chunk_s", type=int, default=DEFAULT_CHUNK_S)

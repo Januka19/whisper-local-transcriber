@@ -122,6 +122,8 @@ en los recursos disponibles.
 --model turbo-int8
 --fallback_model medium
 --compute_type int8
+--cpu_threads 0
+--num_workers 1
 --chunk_s 45
 --overlap_s 0.4
 --beam 1
@@ -138,6 +140,10 @@ en los recursos disponibles.
 
 `--resume` esta activo por defecto. La configuracion se firma para evitar
 mezclar parciales generados con parametros incompatibles.
+
+`--cpu_threads 0` deja que `faster-whisper` decida automaticamente los hilos de
+CPU. Puedes subirlo o fijarlo segun tu maquina; `--num_workers` controla workers
+internos del modelo y por defecto conserva el comportamiento actual.
 
 ## Salidas
 

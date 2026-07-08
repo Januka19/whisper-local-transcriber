@@ -1,13 +1,34 @@
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
+
+
+SHORT_GAP_CONFIDENCE = 0.95
+GAP_CHANGE_CONFIDENCE = 0.85
+FORCED_CHANGE_CONFIDENCE = 0.6
 
 
 def speaker_label(i: int) -> str:
     if 0 <= i < 26:
         return f"Participante {chr(ord('A') + i)}"
     return f"Participante S{i+1}"
+
+
+def _change_reason(gap: float, turn_len: float, turn_gap_s: float, force_turn_max_s: float) -> Optional[str]:
+    if gap >= turn_gap_s:
+        return "gap"
+    if turn_len >= force_turn_max_s:
+        return "max_turn"
+    return None
+
+
+def _confidence_for_reason(reason: str) -> float:
+    if reason == "gap":
+        return GAP_CHANGE_CONFIDENCE
+    if reason == "max_turn":
+        return FORCED_CHANGE_CONFIDENCE
+    return SHORT_GAP_CONFIDENCE
 
 
 def diarize_light(segments: List[Dict[str, Any]], num_speakers: int, turn_gap_s: float, force_turn_max_s: float) -> List[Dict[str, Any]]:
@@ -19,28 +40,43 @@ def diarize_light(segments: List[Dict[str, Any]], num_speakers: int, turn_gap_s:
 
     out: List[Dict[str, Any]] = []
     current = 0
-    turn_start = float(segments[0]["start"])
-    prev_end = float(segments[0]["end"])
+    turn_index = 0
 
-    first = dict(segments[0])
+    ordered = sorted(segments, key=lambda x: (float(x["start"]), float(x["end"])))
+    turn_start = float(ordered[0]["start"])
+    prev_end = float(ordered[0]["end"])
+
+    first = dict(ordered[0])
     first["speaker"] = speaker_label(current)
+    first["speaker_index"] = current
+    first["speaker_turn_index"] = turn_index
+    first["diarization_reason"] = "start"
+    first["diarization_confidence"] = SHORT_GAP_CONFIDENCE
     out.append(first)
 
-    for s in segments[1:]:
+    for s in ordered[1:]:
         start = float(s["start"])
         end = float(s["end"])
-        gap = start - prev_end
-        turn_len = prev_end - turn_start
+        gap = max(0.0, start - prev_end)
+        turn_len = max(0.0, prev_end - turn_start)
 
-        change = (gap >= turn_gap_s) or (turn_len >= force_turn_max_s)
-        if change:
-            current = (current + 1) % num_speakers
+        reason = _change_reason(gap, turn_len, turn_gap_s, force_turn_max_s)
+        if reason:
+            turn_index += 1
             turn_start = start
+            if num_speakers > 1:
+                current = (current + 1) % num_speakers
+        else:
+            reason = "continuation"
 
         s2 = dict(s)
         s2["speaker"] = speaker_label(current)
+        s2["speaker_index"] = current
+        s2["speaker_turn_index"] = turn_index
+        s2["diarization_reason"] = reason
+        s2["diarization_confidence"] = _confidence_for_reason(reason)
         out.append(s2)
-        prev_end = end
+        prev_end = max(prev_end, end)
 
     return out
 
@@ -93,6 +129,7 @@ def review_diarization_interactive(
             k = int(cmd)
             if 1 <= k <= num_speakers:
                 out[i]["speaker"] = speaker_label(k - 1)
+                out[i]["speaker_index"] = k - 1
                 i += 1
                 continue
 

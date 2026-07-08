@@ -104,7 +104,14 @@ class DiarizationUtilsTests(unittest.TestCase):
         ]
         diarized = diarize_light(segments, num_speakers=2, turn_gap_s=1.0, force_turn_max_s=30.0)
         self.assertEqual(diarized[0]["speaker"], "Participante A")
+        self.assertEqual(diarized[0]["speaker_index"], 0)
+        self.assertEqual(diarized[0]["speaker_turn_index"], 0)
+        self.assertEqual(diarized[0]["diarization_reason"], "start")
         self.assertEqual(diarized[1]["speaker"], "Participante B")
+        self.assertEqual(diarized[1]["speaker_index"], 1)
+        self.assertEqual(diarized[1]["speaker_turn_index"], 1)
+        self.assertEqual(diarized[1]["diarization_reason"], "gap")
+        self.assertGreaterEqual(diarized[1]["diarization_confidence"], 0.8)
 
     def test_diarize_light_switches_speaker_on_long_turn(self) -> None:
         segments = [
@@ -113,6 +120,17 @@ class DiarizationUtilsTests(unittest.TestCase):
         ]
         diarized = diarize_light(segments, num_speakers=2, turn_gap_s=10.0, force_turn_max_s=2.0)
         self.assertEqual(diarized[1]["speaker"], "Participante B")
+        self.assertEqual(diarized[1]["diarization_reason"], "max_turn")
+        self.assertLess(diarized[1]["diarization_confidence"], 0.8)
+
+    def test_diarize_light_sorts_segments_by_time(self) -> None:
+        segments = [
+            {"start": 3.0, "end": 4.0, "text": "segundo"},
+            {"start": 0.0, "end": 1.0, "text": "primero"},
+        ]
+        diarized = diarize_light(segments, num_speakers=2, turn_gap_s=1.0, force_turn_max_s=30.0)
+        self.assertEqual([s["text"] for s in diarized], ["primero", "segundo"])
+        self.assertEqual(diarized[1]["diarization_reason"], "gap")
 
     def test_review_diarization_interactive_reassigns_speaker(self) -> None:
         segments = [{"start": 0.0, "end": 1.0, "text": "hola", "speaker": "Participante A"}]
@@ -127,6 +145,7 @@ class DiarizationUtilsTests(unittest.TestCase):
                 input_func=lambda _: next(answers),
             )
         self.assertEqual(reviewed[0]["speaker"], "Participante B")
+        self.assertEqual(reviewed[0]["speaker_index"], 1)
         self.assertTrue(any("Revisión de diarización" in line for line in outputs))
 
 

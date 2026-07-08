@@ -14,7 +14,7 @@ por reglas.
 - Normalizacion inteligente a WAV 16 kHz mono solo cuando el audio lo necesita.
 - Division en chunks con overlap, estado de reanudacion y parciales JSONL.
 - Postproceso opcional: limpieza de muletillas, reemplazos y fusion de segmentos.
-- Diarizacion ligera por turnos y pausas.
+- Diarizacion ligera por turnos y pausas, con motivo y confianza por segmento en JSON.
 - Salidas organizadas en texto y JSON.
 - Pruebas automatizadas con `pytest`.
 
@@ -130,11 +130,11 @@ en los recursos disponibles.
 --normalize / --no-normalize
 --resume / --no-resume
 --vad_filter / --no-vad_filter
---postprocess / --no-postprocess
---remove_fillers / --no-remove_fillers
---write_clean / --no-write_clean
 --diarize / --no-diarize
 --num_speakers 2
+--turn_gap_s 1.2
+--force_turn_max_s 30.0
+--review_diarization / --no-review_diarization
 --clean
 ```
 
@@ -144,6 +144,12 @@ mezclar parciales generados con parametros incompatibles.
 `--cpu_threads 0` deja que `faster-whisper` decida automaticamente los hilos de
 CPU. Puedes subirlo o fijarlo segun tu maquina; `--num_workers` controla workers
 internos del modelo y por defecto conserva el comportamiento actual.
+
+La diarizacion es local y ligera: alterna participantes cuando detecta pausas de
+`--turn_gap_s` o cuando un turno supera `--force_turn_max_s`. En JSON cada
+segmento diarizado incluye `speaker`, `speaker_index`, `speaker_turn_index`,
+`diarization_reason` y `diarization_confidence` para revisar asignaciones
+ambiguas.
 
 ## Salidas
 

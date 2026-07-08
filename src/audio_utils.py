@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 try:
     from src.system_utils import ffprobe_duration_seconds, run_cmd, safe_mkdir
@@ -27,11 +27,22 @@ def normalize_to_wav_16k_mono(input_audio: str, out_wav: str) -> None:
     ])
 
 
-def split_audio_fixed(input_audio: str, chunks_dir: str, chunk_s: int, overlap_s: float, prefix: str) -> List[Chunk]:
+def split_audio_fixed(
+    input_audio: str,
+    chunks_dir: str,
+    chunk_s: int,
+    overlap_s: float,
+    prefix: str,
+    duration_s: Optional[float] = None,
+) -> List[Chunk]:
     safe_mkdir(chunks_dir)
-    dur = ffprobe_duration_seconds(input_audio)
+    dur = float(duration_s) if duration_s and duration_s > 0 else ffprobe_duration_seconds(input_audio)
+    if dur <= 0:
+        return []
 
-    step = float(chunk_s) - float(overlap_s)
+    chunk_len = float(chunk_s)
+    overlap = float(overlap_s)
+    step = chunk_len - overlap
     if step <= 0:
         raise ValueError("chunk_s debe ser mayor que overlap_s.")
 
@@ -40,8 +51,12 @@ def split_audio_fixed(input_audio: str, chunks_dir: str, chunk_s: int, overlap_s
     t = 0.0
 
     while t < dur:
+        remaining = dur - t
+        if chunks and overlap > 0 and remaining <= overlap:
+            break
+
         start = max(0.0, t)
-        end = min(dur, t + chunk_s)
+        end = min(dur, t + chunk_len)
         duration = end - start
 
         out_path = str(Path(chunks_dir) / f"{prefix}_chunk_{idx:04d}.wav")

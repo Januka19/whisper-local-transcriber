@@ -14,7 +14,6 @@ Objetivo:
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import re
@@ -22,7 +21,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 try:
     from src.audio_utils import Chunk, normalize_to_wav_16k_mono, split_audio_fixed
@@ -72,65 +71,13 @@ except ImportError:
         def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any, option_string: Optional[str] = None) -> None:
             setattr(namespace, self.dest, not str(option_string).startswith("--no-"))
 
-# -------------------- UI opcional (rich) --------------------
-RICH_AVAILABLE = False
-console = None
-Panel = None
-Prompt = None
-Confirm = None
-IntPrompt = None
-FloatPrompt = None
-RICH_PROGRESS = None
-
-
-def init_rich() -> None:
-    global RICH_AVAILABLE, console, Panel, Prompt, Confirm, IntPrompt, FloatPrompt
-    if console is not None:
-        return
-    try:
-        rich_console = importlib.import_module("rich.console")
-        rich_panel = importlib.import_module("rich.panel")
-        rich_prompt = importlib.import_module("rich.prompt")
-    except Exception:
-        RICH_AVAILABLE = False
-        console = None
-        Panel = None
-        Prompt = None
-        Confirm = None
-        IntPrompt = None
-        FloatPrompt = None
-        return
-
-    RICH_AVAILABLE = True
-    Panel = rich_panel.Panel
-    Prompt = rich_prompt.Prompt
-    Confirm = rich_prompt.Confirm
-    IntPrompt = rich_prompt.IntPrompt
-    FloatPrompt = rich_prompt.FloatPrompt
-    console = rich_console.Console()
-
-
-init_rich()
-
-
+# -------------------- UI simple --------------------
 def ui_print(msg: str = "") -> None:
-    if RICH_AVAILABLE and console is not None:
-        console.print(msg)
-    else:
-        print(msg)
+    print(msg)
 
 
 def ui_header() -> None:
-    if RICH_AVAILABLE and console is not None:
-        console.print(
-            Panel.fit(
-                "[bold cyan]whisper-local-transcriber · Release 3[/bold cyan]\n"
-                "Offline · CPU-friendly · audios largos · resume · diarización ligera",
-                border_style="cyan",
-            )
-        )
-    else:
-        ui_print("\n=== whisper-local-transcriber · Release 3 ===\n")
+    ui_print("\n=== whisper-local-transcriber · Release 3 ===\n")
 
 
 # -------------------- Dependencia principal --------------------
@@ -199,7 +146,6 @@ DEFAULT_NUM_SPEAKERS = 2
 DEFAULT_TURN_GAP_S = 1.2
 DEFAULT_FORCE_TURN_MAX_S = 30.0
 DEFAULT_REVIEW_DIARIZATION = False
-
 
 
 # -------------------- Texto: dedupe --------------------
@@ -344,8 +290,6 @@ def clean_workspace(workdir: str, logdir: str, audio_name: str) -> None:
 
 # -------------------- Asistente (opcional) --------------------
 def prompt(msg: str, default: Optional[str] = None) -> str:
-    if RICH_AVAILABLE and console is not None:
-        return Prompt.ask(msg, default=default if default is not None else "")
     q = f"{msg} [{default}]: " if default is not None else f"{msg}: "
     s = input(q).strip()
     return s if s else (default if default is not None else "")
@@ -392,7 +336,7 @@ def prompt_bool(msg: str, default: bool = True) -> bool:
 def prompt_int(msg: str, default: int, min_v: int = 1, max_v: int = 10000) -> int:
     while True:
         try:
-            v = IntPrompt.ask(msg, default=default) if (RICH_AVAILABLE and console) else int(prompt(msg, str(default)))
+            v = int(prompt(msg, str(default)))
             if v < min_v or v > max_v:
                 ui_print(f"  ↳ Ingresa un valor entre {min_v} y {max_v}.")
                 continue
@@ -404,7 +348,7 @@ def prompt_int(msg: str, default: int, min_v: int = 1, max_v: int = 10000) -> in
 def prompt_float(msg: str, default: float, min_v: float = 0.0, max_v: float = 10000.0) -> float:
     while True:
         try:
-            v = FloatPrompt.ask(msg, default=default) if (RICH_AVAILABLE and console) else float(prompt(msg, str(default)))
+            v = float(prompt(msg, str(default)))
             if v < min_v or v > max_v:
                 ui_print(f"  ↳ Ingresa un valor entre {min_v} y {max_v}.")
                 continue
@@ -510,7 +454,7 @@ def assisted_args() -> argparse.Namespace:
     ui_print(f"- Chunk: {args.chunk_s}s | overlap: {args.overlap_s}s | beam: {args.beam}")
     ui_print(f"- Diarize: {'Sí' if args.diarize else 'No'}")
 
-    ok_go = Confirm.ask("¿Iniciar transcripción?", default=True) if (RICH_AVAILABLE and console) else prompt_bool("¿Iniciar? (y/n)", True)
+    ok_go = prompt_bool("¿Iniciar? (y/n)", True)
     if not ok_go:
         ui_print("Ejecución cancelada.")
         raise SystemExit(0)
@@ -637,20 +581,20 @@ def run_pipeline(args: argparse.Namespace) -> None:
         log.write(f"🧾 Estado creado: {state_path}")
 
     # Normalize (opcional)
+    audio_info = probe_audio_info(audio_path)
+    input_duration_s = float(audio_info.get("duration_s") or 0.0)
     input_for_split = audio_path
     if args.normalize:
         if os.path.exists(normalized_wav):
             log.write("♻️ Reutilizando WAV normalizado existente.")
             input_for_split = normalized_wav
+        elif audio_needs_normalization(audio_info):
+            log.write("🔧 Normalizando a WAV 16k mono...")
+            normalize_to_wav_16k_mono(audio_path, normalized_wav)
+            input_for_split = normalized_wav
         else:
-            audio_info = probe_audio_info(audio_path)
-            if audio_needs_normalization(audio_info):
-                log.write("🔧 Normalizando a WAV 16k mono...")
-                normalize_to_wav_16k_mono(audio_path, normalized_wav)
-                input_for_split = normalized_wav
-            else:
-                log.write("✅ El audio ya está en 16 kHz mono; se reutiliza sin re-normalizar.")
-                input_for_split = audio_path
+            log.write("✅ El audio ya está en 16 kHz mono; se reutiliza sin re-normalizar.")
+            input_for_split = audio_path
 
     # Chunks: reuso si metadata coincide
     safe_mkdir(chunks_dir)
@@ -699,13 +643,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     if not chunks:
         log.write("✂️ Generando chunks...")
-        chunks = split_audio_fixed(input_for_split, chunks_dir, int(args.chunk_s), float(args.overlap_s), audio_name)
+        chunks = split_audio_fixed(input_for_split, chunks_dir, int(args.chunk_s), float(args.overlap_s), audio_name, input_duration_s)
         log.write(f"✅ Chunks generados: {len(chunks)}")
 
         meta_chunks_obj = {
             "chunk_s": args.chunk_s,
             "overlap_s": args.overlap_s,
             "input_path": input_for_split,
+            "duration_s": input_duration_s,
             "chunks": [{"idx": ch.idx, "path": ch.path, "start_s": ch.start_s, "end_s": ch.end_s} for ch in chunks],
         }
         with open(chunks_metadata_file, "w", encoding="utf-8") as f:
@@ -728,115 +673,70 @@ def run_pipeline(args: argparse.Namespace) -> None:
     if not os.path.exists(partials_jsonl):
         open(partials_jsonl, "w", encoding="utf-8").close()
 
-    # Progreso opcional
-    use_progress = RICH_AVAILABLE and console is not None
-    progress = None
-    task_chunks = None
-    try:
-        if use_progress:
-            global RICH_PROGRESS
-            if RICH_PROGRESS is None:
-                RICH_PROGRESS = importlib.import_module("rich.progress")
-            progress = RICH_PROGRESS.Progress(
-                RICH_PROGRESS.SpinnerColumn(),
-                RICH_PROGRESS.TextColumn("{task.description}"),
-                RICH_PROGRESS.BarColumn(),
-                RICH_PROGRESS.TextColumn("{task.completed}/{task.total} chunks"),
-                RICH_PROGRESS.TimeElapsedColumn(),
-                RICH_PROGRESS.TimeRemainingColumn(),
-                console=console,
-            )
-            progress.__enter__()
-            task_chunks = progress.add_task("Chunks", total=len(chunks))
-    except Exception:
-        progress = None
-        task_chunks = None
-
     t0 = time.time()
 
-    try:
-        for ch in chunks:
-            if progress and task_chunks is not None:
-                try:
-                    progress.update(task_chunks, description=f"Chunk {ch.idx+1}/{len(chunks)}")
-                except Exception:
-                    pass
+    for ch in chunks:
+        if ch.idx in completed:
+            log.write(f"↪️ Saltando chunk {ch.idx} (ya completado)")
+            continue
 
+        log.write(f"\n▶️ Chunk {ch.idx+1}/{len(chunks)}  [{ch.start_s/60:.1f}m -> {ch.end_s/60:.1f}m]")
+
+        def persist_failure(err: str) -> None:
+            failed.add(ch.idx)
+            state["failed_chunks"] = sorted(failed)
+            save_state(state_path, state)
+            log.write(f"⚠️ Fallido: chunk {ch.idx} | {err}")
+
+        try:
+            local_segments = transcribe_one_chunk(
+                model_main, ch.path,
+                args.language, int(args.beam),
+                bool(args.word_timestamps),
+                bool(args.vad_filter),
+            )
+        except Exception as e:
+            log.write(f"⚠️ Falló con principal: {e}")
+            if not fallback_available:
+                persist_failure(str(e))
+                continue
+            if model_fallback is None:
+                log.write("🧠 Cargando fallback...")
+                model_fallback = load_whisper_model(
+                    args.fallback_model,
+                    args.device,
+                    args.fallback_compute_type,
+                    args.cpu_threads,
+                    args.num_workers,
+                )
+            log.write("🔁 Reintentando con fallback...")
             try:
-                if ch.idx in completed:
-                    log.write(f"↪️ Saltando chunk {ch.idx} (ya completado)")
-                    continue
+                local_segments = transcribe_one_chunk(
+                    model_fallback, ch.path,
+                    args.language, int(args.beam),
+                    bool(args.word_timestamps),
+                    bool(args.vad_filter),
+                )
+            except Exception as e2:
+                persist_failure(str(e2))
+                continue
 
-                log.write(f"\n▶️ Chunk {ch.idx+1}/{len(chunks)}  [{ch.start_s/60:.1f}m -> {ch.end_s/60:.1f}m]")
+        segs_global: List[Dict[str, Any]] = [{
+            "chunk_idx": ch.idx,
+            "start": float(ch.start_s + s["start_local"]),
+            "end": float(ch.start_s + s["end_local"]),
+            "text": s["text"],
+        } for s in local_segments]
 
-                def persist_failure(err: str) -> None:
-                    failed.add(ch.idx)
-                    state["failed_chunks"] = sorted(failed)
-                    save_state(state_path, state)
-                    log.write(f"⚠️ Fallido: chunk {ch.idx} | {err}")
+        with open(partials_jsonl, "a", encoding="utf-8") as f:
+            for sg in segs_global:
+                f.write(json.dumps(sg, ensure_ascii=False) + "\n")
 
-                try:
-                    local_segments = transcribe_one_chunk(
-                        model_main, ch.path,
-                        args.language, int(args.beam),
-                        bool(args.word_timestamps),
-                        bool(args.vad_filter),
-                    )
-                except Exception as e:
-                    log.write(f"⚠️ Falló con principal: {e}")
-                    if not fallback_available:
-                        persist_failure(str(e))
-                        continue
-                    if model_fallback is None:
-                        log.write("🧠 Cargando fallback...")
-                        model_fallback = load_whisper_model(
-                            args.fallback_model,
-                            args.device,
-                            args.fallback_compute_type,
-                            args.cpu_threads,
-                            args.num_workers,
-                        )
-                    log.write("🔁 Reintentando con fallback...")
-                    try:
-                        local_segments = transcribe_one_chunk(
-                            model_fallback, ch.path,
-                            args.language, int(args.beam),
-                            bool(args.word_timestamps),
-                            bool(args.vad_filter),
-                        )
-                    except Exception as e2:
-                        persist_failure(str(e2))
-                        continue
+        completed.add(ch.idx)
+        state["completed_chunks"] = sorted(completed)
+        save_state(state_path, state)
 
-                segs_global: List[Dict[str, Any]] = [{
-                    "chunk_idx": ch.idx,
-                    "start": float(ch.start_s + s["start_local"]),
-                    "end": float(ch.start_s + s["end_local"]),
-                    "text": s["text"],
-                } for s in local_segments]
-
-                with open(partials_jsonl, "a", encoding="utf-8") as f:
-                    for sg in segs_global:
-                        f.write(json.dumps(sg, ensure_ascii=False) + "\n")
-
-                completed.add(ch.idx)
-                state["completed_chunks"] = sorted(completed)
-                save_state(state_path, state)
-
-                log.write(f"✅ Chunk {ch.idx} OK ({len(segs_global)} segs)")
-
-            finally:
-                if progress and task_chunks is not None:
-                    try:
-                        progress.advance(task_chunks)
-                    except Exception:
-                        pass
-    finally:
-        if progress is not None:
-            try:
-                progress.__exit__(None, None, None)
-            except Exception:
-                pass
+        log.write(f"✅ Chunk {ch.idx} OK ({len(segs_global)} segs)")
 
     # Consolidar parciales
     segments_global: List[Dict[str, Any]] = []

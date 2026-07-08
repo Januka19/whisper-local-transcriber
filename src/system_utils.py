@@ -41,27 +41,37 @@ def now_stamp() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def probe_audio_info(path: str) -> Dict[str, Any]:
     out = run_cmd([
         "ffprobe", "-v", "error",
         "-select_streams", "a:0",
-        "-show_entries", "stream=sample_rate,channels",
+        "-show_entries", "stream=sample_rate,channels:format=duration",
         "-of", "json",
         path,
     ])
+    empty = {"sample_rate": 0, "channels": 0, "duration_s": 0.0}
     try:
         data = json.loads(out)
     except Exception:
-        return {"sample_rate": 0, "channels": 0}
+        return empty
 
     streams = data.get("streams") or []
     if not streams:
-        return {"sample_rate": 0, "channels": 0}
+        return empty
 
     stream = streams[0] or {}
+    fmt = data.get("format") or {}
     return {
         "sample_rate": int(stream.get("sample_rate") or 0),
         "channels": int(stream.get("channels") or 0),
+        "duration_s": _safe_float(fmt.get("duration")),
     }
 
 

@@ -50,15 +50,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-El script `run.sh` puede crear y mantener la venv automaticamente:
+El script `run.sh` puede crear y mantener la venv automaticamente. El primer
+arranque instala dependencias; los siguientes omiten `pip install` si
+`requirements.txt` no cambio y las dependencias siguen disponibles:
 
 ```bash
 ./run.sh
 ```
 
-Para recrearla desde cero:
+Para reinstalar dependencias o recrear la venv desde cero:
 
 ```bash
+./run.sh --force-install
 ./run.sh --rebuild-venv
 ```
 
@@ -146,10 +149,16 @@ CPU. Puedes subirlo o fijarlo segun tu maquina; `--num_workers` controla workers
 internos del modelo y por defecto conserva el comportamiento actual.
 
 La diarizacion es local y ligera: alterna participantes cuando detecta pausas de
-`--turn_gap_s` o cuando un turno supera `--force_turn_max_s`. En JSON cada
-segmento diarizado incluye `speaker`, `speaker_index`, `speaker_turn_index`,
-`diarization_reason` y `diarization_confidence` para revisar asignaciones
-ambiguas.
+`--turn_gap_s` o cuando un turno supera `--force_turn_max_s`. Para evitar falsos
+cambios, las interjecciones muy cortas despues de una pausa se conservan en el
+turno actual con menor confianza. En JSON cada segmento diarizado incluye
+`speaker`, `speaker_index`, `speaker_turn_index`, `diarization_reason` y
+`diarization_confidence` para revisar asignaciones ambiguas.
+
+La deteccion inicial de audio usa `ffprobe` para obtener formato y duracion en
+una sola pasada. Al dividir en chunks, el runner evita crear un ultimo fragmento
+que solo repite audio ya cubierto por el overlap, reduciendo trabajo innecesario
+en CPU.
 
 ## Salidas
 

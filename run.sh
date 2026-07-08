@@ -24,6 +24,7 @@ VENV_DIR=".venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
 REQ_FILE="requirements.txt"
 REQ_STAMP_FILE="$VENV_DIR/.requirements.sha256"
+VENV_CREATED=false
 
 WORK_DIR="work"
 OUT_DIR="salida"
@@ -91,6 +92,13 @@ needs_python_deps_install() {
 }
 write_requirements_stamp() {
   requirements_fingerprint > "$REQ_STAMP_FILE"
+}
+required_python_deps_available() {
+  "$VENV_PYTHON" - <<'PY'
+import importlib.util
+missing = [name for name in ("faster_whisper",) if importlib.util.find_spec(name) is None]
+raise SystemExit(1 if missing else 0)
+PY
 }
 
 for arg in "$@"; do
@@ -194,6 +202,7 @@ fi
 if [[ ! -d "$VENV_DIR" ]]; then
   info "Creando entorno virtual ($VENV_DIR)..."
   "$PYTHON_BIN" -m venv "$VENV_DIR"
+  VENV_CREATED=true
 fi
 
 # Validar venv: revisar pip, python y compatibilidad de versión
@@ -203,6 +212,7 @@ python_ok "$VENV_PYTHON" || {
   warn "Venv dañada, desactualizada o pip no disponible. Recreando..."
   rm -rf "$VENV_DIR"
   "$PYTHON_BIN" -m venv "$VENV_DIR"
+  VENV_CREATED=true
   "$VENV_PYTHON" -m pip --version >/dev/null 2>&1 || die "pip sigue no disponible después de recrear venv."
 }
 
@@ -214,15 +224,17 @@ if [[ "$NO_LOG_FLAG" == "false" ]]; then
   info "Log: $RUN_LOG"
 fi
 
-info "Actualizando pip/setuptools/wheel..."
-"$VENV_PYTHON" -m pip install -U pip setuptools wheel >/dev/null 2>&1 || warn "No se pudo actualizar pip (continuando)."
+if [[ "$VENV_CREATED" == "true" || "$FORCE_INSTALL" == "true" ]]; then
+  info "Actualizando pip/setuptools/wheel..."
+  "$VENV_PYTHON" -m pip install -U pip setuptools wheel >/dev/null 2>&1 || warn "No se pudo actualizar pip (continuando)."
+fi
 
 # -------------------- deps Python --------------------
 if [[ ! -f "$REQ_FILE" ]]; then
   die "No se encontró $REQ_FILE. No puedo instalar dependencias."
 fi
 
-if [[ "$FORCE_INSTALL" == "true" || "$REBUILD_VENV" == "true" ]] || needs_python_deps_install; then
+if [[ "$FORCE_INSTALL" == "true" || "$REBUILD_VENV" == "true" ]] || needs_python_deps_install || ! required_python_deps_available; then
   if [[ "$FORCE_INSTALL" == "true" ]]; then
     info "Reinstalando dependencias (--force-install)..."
     "$VENV_PYTHON" -m pip install --force-reinstall -r "$REQ_FILE"
@@ -235,9 +247,8 @@ else
   info "Dependencias Python al día; se omite instalación."
 fi
 
-"$VENV_PYTHON" -c "import rich; from rich.console import Console" >/dev/null 2>&1 || die "rich no quedó instalado. Revisa pip output arriba."
-"$VENV_PYTHON" -c "import faster_whisper" >/dev/null 2>&1 || die "faster-whisper no quedó instalado. Revisa pip output arriba."
-ok "Dependencias OK (rich + faster-whisper)."
+required_python_deps_available || die "Dependencias Python incompletas. Reintenta con: ./run.sh --force-install"
+ok "Dependencias OK."
 
 # -------------------- entrypoint --------------------
 ENTRYPOINT=""

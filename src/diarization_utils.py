@@ -7,6 +7,9 @@ from typing import Any, Callable, Dict, List, Optional
 SHORT_GAP_CONFIDENCE = 0.95
 GAP_CHANGE_CONFIDENCE = 0.85
 FORCED_CHANGE_CONFIDENCE = 0.6
+SHORT_SEGMENT_HOLD_CONFIDENCE = 0.7
+SHORT_TURN_MAX_S = 0.8
+SHORT_TURN_MAX_WORDS = 2
 
 
 def speaker_label(i: int) -> str:
@@ -15,8 +18,24 @@ def speaker_label(i: int) -> str:
     return f"Participante S{i+1}"
 
 
-def _change_reason(gap: float, turn_len: float, turn_gap_s: float, force_turn_max_s: float) -> Optional[str]:
+def _is_short_segment(segment: Dict[str, Any], start: float, end: float) -> bool:
+    duration = max(0.0, end - start)
+    words = len((segment.get("text") or "").split())
+    return duration <= SHORT_TURN_MAX_S and words <= SHORT_TURN_MAX_WORDS
+
+
+def _change_reason(
+    segment: Dict[str, Any],
+    start: float,
+    end: float,
+    gap: float,
+    turn_len: float,
+    turn_gap_s: float,
+    force_turn_max_s: float,
+) -> Optional[str]:
     if gap >= turn_gap_s:
+        if _is_short_segment(segment, start, end):
+            return "short_segment_hold"
         return "gap"
     if turn_len >= force_turn_max_s:
         return "max_turn"
@@ -28,6 +47,8 @@ def _confidence_for_reason(reason: str) -> float:
         return GAP_CHANGE_CONFIDENCE
     if reason == "max_turn":
         return FORCED_CHANGE_CONFIDENCE
+    if reason == "short_segment_hold":
+        return SHORT_SEGMENT_HOLD_CONFIDENCE
     return SHORT_GAP_CONFIDENCE
 
 
@@ -60,8 +81,10 @@ def diarize_light(segments: List[Dict[str, Any]], num_speakers: int, turn_gap_s:
         gap = max(0.0, start - prev_end)
         turn_len = max(0.0, prev_end - turn_start)
 
-        reason = _change_reason(gap, turn_len, turn_gap_s, force_turn_max_s)
-        if reason:
+        reason = _change_reason(s, start, end, gap, turn_len, turn_gap_s, force_turn_max_s)
+        if reason == "short_segment_hold":
+            pass
+        elif reason:
             turn_index += 1
             turn_start = start
             if num_speakers > 1:

@@ -9,8 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.audio_utils import split_audio_fixed
 from src.diarization_utils import diarize_light, review_diarization_interactive, speaker_label
 from src.state_utils import config_signature, load_state, resolve_audio_path, save_state
+from src.system_utils import probe_audio_info
 from src.transcriptor import (
     audio_needs_normalization,
     normalize_compute_type,
@@ -92,6 +94,36 @@ class StateUtilsTests(unittest.TestCase):
         self.assertEqual(config_signature(a), config_signature(b))
 
 
+class AudioUtilsTests(unittest.TestCase):
+    def test_probe_audio_info_includes_duration(self) -> None:
+        payload = '{"streams":[{"sample_rate":"16000","channels":1}],"format":{"duration":"12.5"}}'
+        with patch("src.system_utils.run_cmd", return_value=payload):
+            info = probe_audio_info("audio.wav")
+        self.assertEqual(info["sample_rate"], 16000)
+        self.assertEqual(info["channels"], 1)
+        self.assertEqual(info["duration_s"], 12.5)
+
+    def test_split_audio_fixed_skips_tail_already_covered_by_overlap(self) -> None:
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("src.audio_utils.run_cmd", side_effect=lambda cmd: calls.append(cmd) or ""):
+                chunks = split_audio_fixed("audio.wav", tmpdir, chunk_s=45, overlap_s=1.0, prefix="audio", duration_s=45.0)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(chunks[0].start_s, 0.0)
+        self.assertEqual(chunks[0].end_s, 45.0)
+
+    def test_split_audio_fixed_keeps_tail_with_uncovered_audio(self) -> None:
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("src.audio_utils.run_cmd", side_effect=lambda cmd: calls.append(cmd) or ""):
+                chunks = split_audio_fixed("audio.wav", tmpdir, chunk_s=45, overlap_s=1.0, prefix="audio", duration_s=45.5)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(chunks[1].start_s, 44.0)
+        self.assertEqual(chunks[1].end_s, 45.5)
+
+
 class DiarizationUtilsTests(unittest.TestCase):
     def test_speaker_label_supports_letters_and_overflow(self) -> None:
         self.assertEqual(speaker_label(0), "Participante A")
@@ -112,6 +144,27 @@ class DiarizationUtilsTests(unittest.TestCase):
         self.assertEqual(diarized[1]["speaker_turn_index"], 1)
         self.assertEqual(diarized[1]["diarization_reason"], "gap")
         self.assertGreaterEqual(diarized[1]["diarization_confidence"], 0.8)
+
+    def test_diarize_light_holds_short_interjection_after_gap(self) -> None:
+        segments = [
+            {"start": 0.0, "end": 2.0, "text": "estamos revisando el punto principal"},
+            {"start": 4.0, "end": 4.4, "text": "sí"},
+        ]
+        diarized = diarize_light(segments, num_speakers=2, turn_gap_s=1.0, force_turn_max_s=30.0)
+        self.assertEqual(diarized[1]["speaker"], "Participante A")
+        self.assertEqual(diarized[1]["speaker_turn_index"], 0)
+        self.assertEqual(diarized[1]["diarization_reason"], "short_segment_hold")
+        self.assertLess(diarized[1]["diarization_confidence"], 0.8)
+
+    def test_diarize_light_switches_long_segment_after_gap(self) -> None:
+        segments = [
+            {"start": 0.0, "end": 2.0, "text": "estamos revisando el punto principal"},
+            {"start": 4.0, "end": 5.2, "text": "quiero responder con contexto"},
+        ]
+        diarized = diarize_light(segments, num_speakers=2, turn_gap_s=1.0, force_turn_max_s=30.0)
+        self.assertEqual(diarized[1]["speaker"], "Participante B")
+        self.assertEqual(diarized[1]["speaker_turn_index"], 1)
+        self.assertEqual(diarized[1]["diarization_reason"], "gap")
 
     def test_diarize_light_switches_speaker_on_long_turn(self) -> None:
         segments = [

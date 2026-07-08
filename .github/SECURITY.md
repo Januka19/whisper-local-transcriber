@@ -11,7 +11,7 @@ pública** mediante issues.
 
 En su lugar, comunícate de forma confidencial a través del siguiente correo:
 
-📧 **calahorranojavier@gmail.com**
+**calahorranojavier@gmail.com**
 
 Al realizar un reporte, incluye la mayor cantidad de información posible, como:
 

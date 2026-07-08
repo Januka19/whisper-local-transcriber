@@ -15,6 +15,7 @@ from src.state_utils import config_signature, load_state, resolve_audio_path, sa
 from src.system_utils import probe_audio_info
 from src.transcriptor import (
     audio_needs_normalization,
+    format_duration,
     normalize_compute_type,
     normalize_language,
     prompt_bool,
@@ -28,6 +29,11 @@ class TranscriptorValidationTests(unittest.TestCase):
 
     def test_audio_needs_normalization_accepts_16k_mono(self) -> None:
         self.assertFalse(audio_needs_normalization({"sample_rate": 16000, "channels": 1}))
+
+    def test_format_duration_is_human_readable(self) -> None:
+        self.assertEqual(format_duration(0), "0m 00s")
+        self.assertEqual(format_duration(65), "1m 05s")
+        self.assertEqual(format_duration(3661), "1h 01m 01s")
 
     def test_normalize_compute_type_rejects_invalid_value(self) -> None:
         with self.assertRaisesRegex(ValueError, "compute_type inválido"):

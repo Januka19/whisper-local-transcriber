@@ -14,6 +14,7 @@ Objetivo:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -80,14 +81,38 @@ def ui_header() -> None:
     ui_print("\n=== whisper-local-transcriber · Release 3 ===\n")
 
 
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(float(seconds or 0.0))))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
+    return f"{minutes:d}m {secs:02d}s"
+
+
+def log_chunk_progress(log: Logger, processed: int, total: int, ok_count: int, failed_count: int, started_at: float) -> None:
+    if total <= 0 or processed <= 0:
+        return
+    elapsed = time.time() - started_at
+    avg = elapsed / processed
+    remaining = max(0, total - processed) * avg
+    pct = min(100.0, (processed / total) * 100.0)
+    log.write(
+        f"📊 Progreso: {processed}/{total} chunks ({pct:.0f}%) | "
+        f"ok={ok_count} fallidos={failed_count} | "
+        f"elapsed={format_duration(elapsed)} eta={format_duration(remaining)}"
+    )
+
+
 # -------------------- Dependencia principal --------------------
 def load_whisper_model(model_id: str, device: str, compute_type: str, cpu_threads: int, num_workers: int) -> Any:
     try:
-        from faster_whisper import WhisperModel
+        whisper_module = importlib.import_module("faster_whisper")
+        whisper_model = getattr(whisper_module, "WhisperModel")
     except Exception as exc:
         ui_print("❌ ERROR: No se pudo importar faster_whisper. Instala deps")
         raise SystemExit(1) from exc
-    return WhisperModel(
+    return whisper_model(
         model_id,
         device=device,
         compute_type=compute_type,
@@ -527,7 +552,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     log.write(f"🧠 Modelo: {args.model} | compute={args.compute_type} | device={args.device}")
     log.write(f"🧵 CPU threads={args.cpu_threads} | workers={args.num_workers}")
     log.write(f"🧠 Fallback: {args.fallback_model or '(none)'} | compute={args.fallback_compute_type or '(none)'}")
-    log.write(f"⚙️ chunk={args.chunk_s}s overlap={args.overlap_s}s beam={args.beam} normalize={bool(args.normalize)} resume={bool(args.resume)} vad={bool(args.vad_filter)}")
+    log.write(f"⚙️ chunk={args.chunk_s}s overlap={args.overlap_s}s beam={args.beam} word_ts={bool(args.word_timestamps)} normalize={bool(args.normalize)} resume={bool(args.resume)} vad={bool(args.vad_filter)}")
     log.write(f"🗣️ diarize={bool(args.diarize)} speakers={getattr(args,'num_speakers',0)} turn_gap={getattr(args,'turn_gap_s',0)} force_turn_max={getattr(args,'force_turn_max_s',0)} review={getattr(args,'review_diarization',False)}")
     log.write(f"🧾 Log file: {log_path}")
 
@@ -547,6 +572,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "chunk_s": args.chunk_s,
         "overlap_s": args.overlap_s,
         "beam": args.beam,
+        "word_timestamps": bool(args.word_timestamps),
         "normalize": bool(args.normalize),
         "vad_filter": bool(args.vad_filter),
     }
@@ -582,6 +608,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # Normalize (opcional)
     audio_info = probe_audio_info(audio_path)
     input_duration_s = float(audio_info.get("duration_s") or 0.0)
+    log.write(
+        f"🎧 Audio detectado: duration={format_duration(input_duration_s)} "
+        f"sample_rate={int(audio_info.get('sample_rate') or 0)}Hz "
+        f"channels={int(audio_info.get('channels') or 0)}"
+    )
     input_for_split = audio_path
     if args.normalize:
         if os.path.exists(normalized_wav):
@@ -668,6 +699,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     completed = set(state.get("completed_chunks", []))
     failed = set(state.get("failed_chunks", []))
+    pending_count = len([ch for ch in chunks if ch.idx not in completed])
+    log.write(f"📦 Chunks: total={len(chunks)} completados={len(completed)} pendientes={pending_count} fallidos_previos={len(failed)}")
 
     if not os.path.exists(partials_jsonl):
         open(partials_jsonl, "w", encoding="utf-8").close()
@@ -686,6 +719,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
             state["failed_chunks"] = sorted(failed)
             save_state(state_path, state)
             log.write(f"⚠️ Fallido: chunk {ch.idx} | {err}")
+            log_chunk_progress(log, len(completed.union(failed)), len(chunks), len(completed), len(failed), t0)
 
         try:
             local_segments = transcribe_one_chunk(
@@ -736,6 +770,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         save_state(state_path, state)
 
         log.write(f"✅ Chunk {ch.idx} OK ({len(segs_global)} segs)")
+        log_chunk_progress(log, len(completed.union(failed)), len(chunks), len(completed), len(failed), t0)
 
     # Consolidar parciales
     segments_global: List[Dict[str, Any]] = []
@@ -778,6 +813,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "chunk_s": args.chunk_s,
         "overlap_s": args.overlap_s,
         "beam": args.beam,
+        "word_timestamps": bool(args.word_timestamps),
+        "audio_duration_s": input_duration_s,
         "normalized": bool(args.normalize),
         "vad_filter": bool(args.vad_filter),
         "diarize": bool(args.diarize),
@@ -795,6 +832,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     write_outputs(segments_final, meta, out_txt, out_json)
     log.write("\n✅ Listo.")
+    log.write(f"📊 Resumen final: chunks_ok={len(completed)}/{len(chunks)} chunks_failed={len(failed)} elapsed={format_duration(t1 - t0)}")
     log.write(f"TXT:  {out_txt}")
     log.write(f"JSON: {out_json}")
     if failed:

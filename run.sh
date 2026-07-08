@@ -33,6 +33,7 @@ REBUILD_VENV=false
 FORCE_INSTALL=false
 SYSTEM_DEPS=false
 NO_LOG_FLAG=false
+SHOW_RUNNER_HELP=false
 ARGS=()
 
 say()  { printf "%b\n" "$*"; }
@@ -40,6 +41,26 @@ info() { say "ℹ️  $*"; }
 ok()   { say "✅ $*"; }
 warn() { say "⚠️  $*"; }
 die()  { say "❌ $*"; exit 1; }
+show_usage() {
+  cat <<'EOF'
+whisper-local-transcriber :: runner
+
+Uso:
+  ./run.sh [flags del runner] [--] [args de transcriptor.py]
+
+Flags del runner:
+  -h, --help        Muestra esta ayuda y sale
+  --rebuild-venv    Borra y recrea la venv
+  --force-install   Reinstala requirements (force-reinstall)
+  --system-deps     Intenta instalar deps de sistema (requiere sudo)
+  --no-log          No hace tee a archivo de log
+
+Ejemplos:
+  ./run.sh
+  ./run.sh ruta/al/audio.mp3 --language es
+  ./run.sh -- --help
+EOF
+}
 
 on_error() {
   local exit_code=$?
@@ -74,13 +95,27 @@ write_requirements_stamp() {
 
 for arg in "$@"; do
   case "$arg" in
+    --)
+      shift
+      ARGS+=("$@")
+      break
+      ;;
+    -h|--help)
+      SHOW_RUNNER_HELP=true
+      ;;
     --rebuild-venv) REBUILD_VENV=true ;;
     --force-install) FORCE_INSTALL=true ;;
     --system-deps) SYSTEM_DEPS=true ;;
     --no-log) NO_LOG_FLAG=true ;;
     *) ARGS+=("$arg") ;;
   esac
+  shift
 done
+
+if [[ "$SHOW_RUNNER_HELP" == "true" ]]; then
+  show_usage
+  exit 0
+fi
 
 SKIP_SYSTEM_CHECKS=false
 if [[ ${#ARGS[@]} -gt 0 ]]; then
@@ -105,6 +140,16 @@ python_ok "$PYTHON_BIN" || die "Se requiere Python 3.8 o superior."
 
 PY_VER="$($PYTHON_BIN -c 'import sys; print("{}.{}.{}".format(sys.version_info.major, sys.version_info.minor, sys.version_info.micro))')"
 info "Python seleccionado: $PYTHON_BIN (v$PY_VER)"
+
+# Ayuda rápida del transcriptor sin preparar entorno completo.
+if [[ "$SKIP_SYSTEM_CHECKS" == "true" ]]; then
+  if [[ -f "src/transcriptor.py" ]]; then
+    exec "$PYTHON_BIN" "src/transcriptor.py" "${ARGS[@]}"
+  elif [[ -f "transcriptor.py" ]]; then
+    exec "$PYTHON_BIN" "transcriptor.py" "${ARGS[@]}"
+  fi
+  die "No encuentro transcriptor.py (busqué en ./transcriptor.py y ./src/transcriptor.py)."
+fi
 
 # -------------------- deps de sistema (opcional) --------------------
 install_system_deps() {

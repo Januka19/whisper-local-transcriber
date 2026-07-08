@@ -476,9 +476,9 @@ def assisted_args() -> argparse.Namespace:
         force_turn_max_s = prompt_float("Forzar cambio si bloque ≥ (s)", DEFAULT_FORCE_TURN_MAX_S, 5.0, 600.0)
         review_diar = prompt_bool("Revisar diarización al final (y/n)", False)
 
-    workdir = normalize_non_empty_text(prompt("Carpeta work", DEFAULT_WORKDIR), "workdir")
-    outdir = normalize_non_empty_text(prompt("Carpeta salida", DEFAULT_OUTDIR), "outdir")
-    logdir = normalize_non_empty_text(prompt("Carpeta logs", DEFAULT_LOGDIR), "logdir")
+    workdir = DEFAULT_WORKDIR
+    outdir = DEFAULT_OUTDIR
+    logdir = DEFAULT_LOGDIR
 
     force_reuse_chunks = prompt_bool("Forzar reutilización chunks (y/n)", False)
     clean = prompt_bool("Eliminar intermedios al final (--clean) (y/n)", False)

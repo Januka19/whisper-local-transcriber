@@ -102,7 +102,6 @@ DEFAULT_OUTDIR = "salida"
 DEFAULT_LOGDIR = "logs"
 
 # Modelo recomendado para mejor calidad en CPU (CT2 INT8 turbo).
-# Puedes cambiar el default a "medium" si prefieres menos RAM/CPU por defecto.
 TURBO_INT8_CT2 = "Zoont/faster-whisper-large-v3-turbo-int8-ct2"
 
 MODEL_ALIASES = {
@@ -528,7 +527,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     log.write(f"🧠 Modelo: {args.model} | compute={args.compute_type} | device={args.device}")
     log.write(f"🧵 CPU threads={args.cpu_threads} | workers={args.num_workers}")
     log.write(f"🧠 Fallback: {args.fallback_model or '(none)'} | compute={args.fallback_compute_type or '(none)'}")
-    log.write(f"⚙️ chunk={args.chunk_s}s overlap={args.overlap_s}s beam={args.beam} word_ts={bool(args.word_timestamps)} normalize={bool(args.normalize)} resume={bool(args.resume)} vad={bool(args.vad_filter)}")
+    log.write(f"⚙️ chunk={args.chunk_s}s overlap={args.overlap_s}s beam={args.beam} normalize={bool(args.normalize)} resume={bool(args.resume)} vad={bool(args.vad_filter)}")
     log.write(f"🗣️ diarize={bool(args.diarize)} speakers={getattr(args,'num_speakers',0)} turn_gap={getattr(args,'turn_gap_s',0)} force_turn_max={getattr(args,'force_turn_max_s',0)} review={getattr(args,'review_diarization',False)}")
     log.write(f"🧾 Log file: {log_path}")
 
@@ -548,7 +547,6 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "chunk_s": args.chunk_s,
         "overlap_s": args.overlap_s,
         "beam": args.beam,
-        "word_timestamps": bool(args.word_timestamps),
         "normalize": bool(args.normalize),
         "vad_filter": bool(args.vad_filter),
     }
@@ -780,7 +778,6 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "chunk_s": args.chunk_s,
         "overlap_s": args.overlap_s,
         "beam": args.beam,
-        "word_timestamps": bool(args.word_timestamps),
         "normalized": bool(args.normalize),
         "vad_filter": bool(args.vad_filter),
         "diarize": bool(args.diarize),

@@ -132,17 +132,20 @@ en los recursos disponibles.
 ## Diarizacion
 
 La diarizacion usa exclusivamente el modelo local Sherpa ONNX y esta activa por
-defecto. Nunca descarga pesos durante una transcripcion normal, por lo que debes
-prepararlos una vez antes de usarla.
+defecto. Al ejecutar `./run.sh`, el runner comprueba los pesos y los descarga
+automaticamente si faltan. Esta preparacion solo requiere red la primera vez;
+despues, las transcripciones funcionan con los archivos locales.
 
-Prepara una vez los modelos de segmentacion Pyannote INT8 y embeddings TitaNet:
+Tambien puedes preparar explicitamente los modelos de segmentacion Pyannote INT8
+y embeddings TitaNet sin iniciar una transcripcion:
 
 ```bash
 ./run.sh --setup_diarization_models
 ```
 
-Los pesos se guardan por defecto en `models/diarization/` y despues funcionan
-offline. Si no necesitas diarizacion, puedes omitirla explicitamente:
+Los pesos se guardan por defecto en `models/diarization/`. Si no necesitas
+diarizacion, puedes omitirla explicitamente; en ese caso `run.sh` tampoco intenta
+descargar sus modelos:
 
 ```bash
 ./run.sh entrevista.wav --no-diarize

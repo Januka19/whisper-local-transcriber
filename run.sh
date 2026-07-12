@@ -36,6 +36,9 @@ SYSTEM_DEPS=false
 NO_LOG_FLAG=false
 SHOW_RUNNER_HELP=false
 ARGS=()
+DIARIZATION_ENABLED=true
+DIARIZATION_SETUP_REQUESTED=false
+DIARIZATION_MODEL_DIR="models/diarization"
 
 say()  { printf "%b\n" "$*"; }
 info() { say "ℹ️  $*"; }
@@ -118,6 +121,31 @@ for arg in "$@"; do
     *) ARGS+=("$arg") ;;
   esac
   shift
+done
+
+# Detectar opciones del transcriptor que afectan la preparación automática de
+# diarización. La validación completa de argumentos sigue perteneciendo a Python.
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+  case "${ARGS[$i]}" in
+    --no-diarize)
+      DIARIZATION_ENABLED=false
+      ;;
+    --diarize)
+      DIARIZATION_ENABLED=true
+      ;;
+    --setup_diarization_models)
+      DIARIZATION_SETUP_REQUESTED=true
+      ;;
+    --diarization_model_dir)
+      if ((i + 1 < ${#ARGS[@]})); then
+        DIARIZATION_MODEL_DIR="${ARGS[$((i + 1))]}"
+        ((i += 1))
+      fi
+      ;;
+    --diarization_model_dir=*)
+      DIARIZATION_MODEL_DIR="${ARGS[$i]#*=}"
+      ;;
+  esac
 done
 
 if [[ "$SHOW_RUNNER_HELP" == "true" ]]; then
@@ -258,6 +286,20 @@ elif [[ -f "transcriptor.py" ]]; then
   ENTRYPOINT="transcriptor.py"
 else
   die "No encuentro transcriptor.py (busqué en ./transcriptor.py y ./src/transcriptor.py)."
+fi
+
+# La diarización está activa por defecto. En la primera ejecución, preparar sus
+# pesos explícitamente antes de entrar al pipeline para que el usuario solo tenga
+# que lanzar run.sh. Las siguientes ejecuciones reutilizan los archivos locales.
+if [[ "$DIARIZATION_ENABLED" == "true" && "$DIARIZATION_SETUP_REQUESTED" == "false" ]]; then
+  if ! "$VENV_PYTHON" -c \
+      'import sys; from src.diarization_utils import sherpa_diarization_ready; raise SystemExit(0 if sherpa_diarization_ready(sys.argv[1])[0] else 1)' \
+      "$DIARIZATION_MODEL_DIR"; then
+    info "Preparando modelos locales de diarización (solo la primera vez)..."
+    "$VENV_PYTHON" "$ENTRYPOINT" \
+      --setup_diarization_models \
+      --diarization_model_dir "$DIARIZATION_MODEL_DIR"
+  fi
 fi
 
 ok "Entorno listo. Ejecutando transcriptor..."

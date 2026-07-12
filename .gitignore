@@ -13,6 +13,7 @@ venv/
 work/
 salida/
 logs/
+models/
 
 # Estados / parciales
 *_estado.json

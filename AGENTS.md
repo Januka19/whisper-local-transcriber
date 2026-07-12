@@ -34,7 +34,7 @@ interfaz puede usarse como asistente interactivo o como CLI reproducible.
   - Estado de reanudación y parciales JSONL.
   - Carga perezosa de modelo principal y fallback.
   - Transcripción con `faster-whisper`.
-  - Deduplicación, postproceso y diarización ligera.
+  - Deduplicación, postproceso y diarización local con Sherpa ONNX.
   - Escritura de salidas TXT/JSON.
 - `run.sh`: runner Bash robusto para crear/usar `.venv`, instalar requirements y
   llamar a `src/transcriptor.py`.

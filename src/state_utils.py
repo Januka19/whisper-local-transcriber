@@ -16,13 +16,25 @@ def resolve_audio_path(audio_arg: str) -> str:
     return str(p)
 
 
+def audio_source_identity(audio_path: str) -> Dict[str, Any]:
+    """Return cheap identity data used to prevent unsafe resume/reuse."""
+    path = Path(audio_path).resolve()
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
 def load_state(state_path: str) -> Dict[str, Any]:
     path = Path(state_path)
     if not path.exists():
         return {}
     try:
         with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+        return state if isinstance(state, dict) else {}
     except Exception:
         return {}
 

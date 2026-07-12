@@ -73,7 +73,7 @@ on_error() {
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
-python_ok() { "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; }
+python_ok() { "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; }
 requirements_fingerprint() {
   "$PYTHON_BIN" - <<'PY'
 from pathlib import Path
@@ -96,7 +96,7 @@ write_requirements_stamp() {
 required_python_deps_available() {
   "$VENV_PYTHON" - <<'PY'
 import importlib.util
-missing = [name for name in ("faster_whisper",) if importlib.util.find_spec(name) is None]
+missing = [name for name in ("faster_whisper", "sherpa_onnx") if importlib.util.find_spec(name) is None]
 raise SystemExit(1 if missing else 0)
 PY
 }
@@ -144,7 +144,7 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 need_cmd "$PYTHON_BIN" || die "No se encontró '$PYTHON_BIN'. Instálalo y vuelve a intentar."
-python_ok "$PYTHON_BIN" || die "Se requiere Python 3.8 o superior."
+python_ok "$PYTHON_BIN" || die "Se requiere Python 3.9 o superior."
 
 PY_VER="$($PYTHON_BIN -c 'import sys; print("{}.{}.{}".format(sys.version_info.major, sys.version_info.minor, sys.version_info.micro))')"
 info "Python seleccionado: $PYTHON_BIN (v$PY_VER)"

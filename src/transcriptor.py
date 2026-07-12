@@ -7,7 +7,7 @@ whisper-local-transcriber :: Transcriptor Release 3 (estable)
 Objetivo:
 - Offline, CPU-friendly, audios largos, ejecución reproducible.
 - Resume real (estado + parciales), con validación de compatibilidad.
-- Postproceso opcional + diarización ligera por reglas (turnos por pausas).
+- Diarización local mediante modelo Sherpa ONNX.
 - Modelos flexibles: acepta IDs de HuggingFace / rutas locales / alias.
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import math
 import os
 import re
 import shutil
@@ -26,8 +27,15 @@ from typing import Any, Dict, List, Optional
 
 try:
     from src.audio_utils import Chunk, normalize_to_wav_16k_mono, split_audio_fixed
-    from src.diarization_utils import diarize_light, review_diarization_interactive
-    from src.state_utils import config_signature, load_state, resolve_audio_path, save_state
+    from src.diarization_utils import (
+        DEFAULT_DIARIZATION_MODEL_DIR,
+        create_sherpa_diarizer,
+        diarize_sherpa,
+        require_sherpa_diarization,
+        review_diarization_interactive,
+        setup_sherpa_diarization_models,
+    )
+    from src.state_utils import audio_source_identity, config_signature, load_state, resolve_audio_path, save_state
     from src.system_utils import (
         Logger,
         audio_needs_normalization,
@@ -38,8 +46,15 @@ try:
     )
 except ModuleNotFoundError:
     from audio_utils import Chunk, normalize_to_wav_16k_mono, split_audio_fixed
-    from diarization_utils import diarize_light, review_diarization_interactive
-    from state_utils import config_signature, load_state, resolve_audio_path, save_state
+    from diarization_utils import (
+        DEFAULT_DIARIZATION_MODEL_DIR,
+        create_sherpa_diarizer,
+        diarize_sherpa,
+        require_sherpa_diarization,
+        review_diarization_interactive,
+        setup_sherpa_diarization_models,
+    )
+    from state_utils import audio_source_identity, config_signature, load_state, resolve_audio_path, save_state
     from system_utils import (
         Logger,
         audio_needs_normalization,
@@ -49,11 +64,11 @@ except ModuleNotFoundError:
         safe_mkdir,
     )
 
-MIN_PYTHON = (3, 8)
+MIN_PYTHON = (3, 9)
 VALID_COMPUTE_TYPES = {"int8", "int16", "float16", "float32"}
 
 if sys.version_info < MIN_PYTHON:
-    raise SystemExit("whisper-local-transcriber requiere Python 3.8 o superior.")
+    raise SystemExit("whisper-local-transcriber requiere Python 3.9 o superior.")
 
 try:
     from argparse import BooleanOptionalAction
@@ -126,23 +141,29 @@ DEFAULT_WORKDIR = "work"
 DEFAULT_OUTDIR = "salida"
 DEFAULT_LOGDIR = "logs"
 
-# Modelo recomendado para mejor calidad en CPU (CT2 INT8 turbo).
-TURBO_INT8_CT2 = "Zoont/faster-whisper-large-v3-turbo-int8-ct2"
+# Alias nativo soportado por faster-whisper. La librería resuelve este nombre a
+# su conversión CTranslate2 mantenida; compute_type=int8 conserva el perfil CPU.
+DEFAULT_TURBO_MODEL = "large-v3-turbo"
+LEGACY_TURBO_INT8_CT2 = "Zoont/faster-whisper-large-v3-turbo-int8-ct2"
 
 MODEL_ALIASES = {
     # Alias cortos
-    "turbo-int8": TURBO_INT8_CT2,
-    "large-v3-turbo-int8": TURBO_INT8_CT2,
-    "large-v3-turbo-int8-ct2": TURBO_INT8_CT2,
+    "turbo-int8": DEFAULT_TURBO_MODEL,
+    "large-v3-turbo-int8": DEFAULT_TURBO_MODEL,
+    "large-v3-turbo-int8-ct2": DEFAULT_TURBO_MODEL,
     "large-v3": "large-v3",
+    "quality": "large-v3",
+    "max-quality": "large-v3",
     "large-v2": "large-v2",
     "medium": "medium",
-    # Si alguien pone "turbo", le damos una salida razonable (INT8 CT2)
-    "turbo": TURBO_INT8_CT2,
-    "large-v3-turbo": TURBO_INT8_CT2,
+    "turbo": DEFAULT_TURBO_MODEL,
+    "large-v3-turbo": DEFAULT_TURBO_MODEL,
+    # Permite seguir usando el checkpoint anterior ya descargado en entornos
+    # sin red, pero deja de ser la recomendación por defecto.
+    "turbo-int8-legacy": LEGACY_TURBO_INT8_CT2,
 }
 
-DEFAULT_MODEL = TURBO_INT8_CT2
+DEFAULT_MODEL = DEFAULT_TURBO_MODEL
 DEFAULT_FALLBACK_MODEL = "medium"          # fallback más liviano que large turbo
 DEFAULT_DEVICE = "cpu"
 DEFAULT_COMPUTE_TYPE = "int8"
@@ -164,11 +185,9 @@ DEDUP_WINDOW = 8
 SIMILARITY_THRESHOLD = 0.92
 MAX_REPEAT_PHRASE = 3
 
-# Diarización ligera
+# Diarización por modelo
 DEFAULT_DIARIZE = True
 DEFAULT_NUM_SPEAKERS = 2
-DEFAULT_TURN_GAP_S = 1.2
-DEFAULT_FORCE_TURN_MAX_S = 30.0
 DEFAULT_REVIEW_DIARIZATION = False
 
 
@@ -276,6 +295,60 @@ def write_outputs(segments_global: List[Dict[str, Any]], meta: Dict[str, Any], o
         json.dump({"meta": meta, "segments": segments_global}, f, ensure_ascii=False, indent=2)
 
 
+def sanitize_partials(partials_jsonl: str, completed_chunks: set[int]) -> tuple[int, set[int]]:
+    """Remove unsafe records and identify completed chunks that need a retry."""
+    path = Path(partials_jsonl)
+    if not path.exists():
+        return 0, set()
+
+    valid_records: List[tuple[int, Dict[str, Any]]] = []
+    removed = 0
+    retry_chunks: set[int] = set()
+    with path.open("r", encoding="utf-8") as source:
+        for raw_line in source:
+            line = raw_line.strip()
+            if not line:
+                continue
+            chunk_idx: Optional[int] = None
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise TypeError("el parcial no es un objeto")
+                chunk_idx = int(record["chunk_idx"])
+                start = float(record["start"])
+                end = float(record["end"])
+                if not math.isfinite(start) or not math.isfinite(end) or end < start:
+                    raise ValueError("marcas de tiempo inválidas")
+                if not isinstance(record["text"], str):
+                    raise TypeError("texto inválido")
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                removed += 1
+                if chunk_idx is None:
+                    # Sin índice no se puede saber qué resultado quedó dañado.
+                    retry_chunks.update(completed_chunks)
+                elif chunk_idx in completed_chunks:
+                    retry_chunks.add(chunk_idx)
+                continue
+            if chunk_idx not in completed_chunks:
+                removed += 1
+                continue
+            valid_records.append((chunk_idx, record))
+
+    kept = [
+        json.dumps(record, ensure_ascii=False)
+        for chunk_idx, record in valid_records
+        if chunk_idx not in retry_chunks
+    ]
+    removed += len(valid_records) - len(kept)
+    if removed or retry_chunks:
+        temporary = path.with_name(path.name + ".tmp")
+        with temporary.open("w", encoding="utf-8") as output:
+            for line in kept:
+                output.write(line + "\n")
+        temporary.replace(path)
+    return removed, retry_chunks
+
+
 def clean_workspace(workdir: str, logdir: str, audio_name: str) -> None:
     ui_print("\n🧹 Limpieza final (--clean): eliminando intermedios...")
 
@@ -284,6 +357,7 @@ def clean_workspace(workdir: str, logdir: str, audio_name: str) -> None:
         Path(workdir) / f"{audio_name}_estado.json",
         Path(workdir) / f"{audio_name}_partials.jsonl",
         Path(workdir) / f"{audio_name}_normalized_16k.wav",
+        Path(workdir) / f"{audio_name}_normalized_16k.json",
         Path(workdir) / f"{audio_name}_chunks_metadata.json",
     ]
     for p in targets:
@@ -433,15 +507,11 @@ def assisted_args() -> argparse.Namespace:
         except ValueError as e:
             ui_print(f"  ↳ {e}")
 
-    diarize = prompt_bool("Diarización ligera (y/n)", True)
+    diarize = prompt_bool("Diarización con modelo Sherpa (y/n)", True)
     num_speakers = DEFAULT_NUM_SPEAKERS
-    turn_gap_s = DEFAULT_TURN_GAP_S
-    force_turn_max_s = DEFAULT_FORCE_TURN_MAX_S
     review_diar = False
     if diarize:
         num_speakers = prompt_int("Número de participantes", DEFAULT_NUM_SPEAKERS, 1, 9)
-        turn_gap_s = prompt_float("Cambio de turno si pausa ≥ (s)", DEFAULT_TURN_GAP_S, 0.1, 10.0)
-        force_turn_max_s = prompt_float("Forzar cambio si bloque ≥ (s)", DEFAULT_FORCE_TURN_MAX_S, 5.0, 600.0)
         review_diar = prompt_bool("Revisar diarización al final (y/n)", False)
 
     workdir = DEFAULT_WORKDIR
@@ -463,8 +533,9 @@ def assisted_args() -> argparse.Namespace:
         beam=beam, word_timestamps=False,
         normalize=normalize, resume=resume,
         vad_filter=vad_filter,
-        diarize=diarize, num_speakers=num_speakers, turn_gap_s=turn_gap_s,
-        force_turn_max_s=force_turn_max_s, review_diarization=review_diar,
+        diarize=diarize, num_speakers=num_speakers,
+        review_diarization=review_diar,
+        diarization_model_dir=DEFAULT_DIARIZATION_MODEL_DIR,
         force_reuse_chunks=force_reuse_chunks,
         clean=clean,
     )
@@ -497,6 +568,10 @@ def validate_args(args: argparse.Namespace) -> None:
     args.audio = normalize_non_empty_text(args.audio, "audio")
     args.fallback_model = canonical_model_id((args.fallback_model or "").strip()) if args.fallback_model else ""
     args.fallback_compute_type = normalize_compute_type(args.fallback_compute_type)
+    args.diarization_model_dir = normalize_non_empty_text(
+        getattr(args, "diarization_model_dir", DEFAULT_DIARIZATION_MODEL_DIR),
+        "diarization_model_dir",
+    )
 
     if args.chunk_s <= 0:
         raise ValueError("chunk_s debe ser > 0")
@@ -510,10 +585,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("cpu_threads debe ser >= 0")
     if args.num_workers < 1:
         raise ValueError("num_workers debe ser >= 1")
-    if args.turn_gap_s <= 0:
-        raise ValueError("turn_gap_s debe ser > 0")
-    if args.force_turn_max_s <= 0:
-        raise ValueError("force_turn_max_s debe ser > 0")
     if args.diarize and (args.num_speakers < 1 or args.num_speakers > 9):
         raise ValueError("num_speakers debe estar entre 1 y 9")
 
@@ -539,6 +610,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     normalized_wav = str(Path(args.workdir) / f"{audio_name}_normalized_16k.wav")
     partials_jsonl = str(Path(args.workdir) / f"{audio_name}_partials.jsonl")
     chunks_metadata_file = str(Path(args.workdir) / f"{audio_name}_chunks_metadata.json")
+    normalized_metadata_file = str(Path(args.workdir) / f"{audio_name}_normalized_16k.json")
 
     out_txt = str(Path(args.outdir) / f"{audio_name}_transcripcion_final.txt")
     out_json = str(Path(args.outdir) / f"{audio_name}_transcripcion_final.json")
@@ -553,8 +625,21 @@ def run_pipeline(args: argparse.Namespace) -> None:
     log.write(f"🧵 CPU threads={args.cpu_threads} | workers={args.num_workers}")
     log.write(f"🧠 Fallback: {args.fallback_model or '(none)'} | compute={args.fallback_compute_type or '(none)'}")
     log.write(f"⚙️ chunk={args.chunk_s}s overlap={args.overlap_s}s beam={args.beam} word_ts={bool(args.word_timestamps)} normalize={bool(args.normalize)} resume={bool(args.resume)} vad={bool(args.vad_filter)}")
-    log.write(f"🗣️ diarize={bool(args.diarize)} speakers={getattr(args,'num_speakers',0)} turn_gap={getattr(args,'turn_gap_s',0)} force_turn_max={getattr(args,'force_turn_max_s',0)} review={getattr(args,'review_diarization',False)}")
+    log.write(f"🗣️ diarize={bool(args.diarize)} speakers={getattr(args,'num_speakers',0)} review={getattr(args,'review_diarization',False)} model_dir={args.diarization_model_dir}")
     log.write(f"🧾 Log file: {log_path}")
+
+    diarization_threads = int(args.cpu_threads) if int(args.cpu_threads) > 0 else min(4, os.cpu_count() or 1)
+    sherpa_diarizer = None
+    if args.diarize:
+        readiness = require_sherpa_diarization(args.diarization_model_dir)
+        sherpa_diarizer = create_sherpa_diarizer(
+            args.diarization_model_dir,
+            int(args.num_speakers),
+            diarization_threads,
+        )
+        log.write(f"✅ Diarización Sherpa preparada: {readiness}")
+
+    source_identity = audio_source_identity(audio_path)
 
     # Resume state
     state = load_state(state_path) if args.resume else {}
@@ -562,6 +647,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # Firma de config para resume (evita mezclar cosas)
     cfg_for_sig = {
         "audio_path": audio_path,
+        "audio_source": source_identity,
         "model": args.model,
         "fallback_model": args.fallback_model,
         "compute_type": args.compute_type,
@@ -580,20 +666,26 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     if state and args.resume:
         if state.get("config_sig") != sig:
-            if getattr(args, "force_reuse_chunks", False):
-                log.write("⚠️ config_sig difiere, pero --force_reuse_chunks está activo. Continuaré con cautela.")
-            else:
-                log.write("⚠️ Estado incompatible con la configuración actual. Reiniciando estado (se ignora --resume).")
-                state = {}
-                # Limpiar parciales para evitar mezcla
-                try:
-                    if os.path.exists(partials_jsonl):
-                        os.remove(partials_jsonl)
-                        log.write(f"🧹 Eliminado parcial: {partials_jsonl}")
-                except Exception as e:
-                    log.write(f"⚠️ No pude borrar parcial: {e}")
+            log.write("⚠️ Estado incompatible con la configuración actual. Se reiniciarán estado y parciales.")
+            state = {}
+            # --force_reuse_chunks solo aplica al audio troceado, nunca a
+            # resultados de transcripción creados con otra configuración.
+            try:
+                if os.path.exists(partials_jsonl):
+                    os.remove(partials_jsonl)
+                    log.write(f"🧹 Eliminado parcial: {partials_jsonl}")
+            except OSError as e:
+                raise RuntimeError(f"No se pudo eliminar el parcial incompatible: {e}") from e
 
     if not state:
+        # Sin un estado válido no hay forma segura de asociar parciales previos
+        # con esta ejecución (también cubre --no-resume y estados corruptos).
+        if os.path.exists(partials_jsonl):
+            try:
+                os.remove(partials_jsonl)
+                log.write(f"🧹 Inicio limpio: eliminado parcial anterior {partials_jsonl}")
+            except OSError as e:
+                raise RuntimeError(f"No se pudo reiniciar el archivo de parciales: {e}") from e
         state = {
             "audio_path": audio_path,
             "audio_name": audio_name,
@@ -604,6 +696,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         }
         save_state(state_path, state)
         log.write(f"🧾 Estado creado: {state_path}")
+    elif state.get("completed_chunks") and not os.path.exists(partials_jsonl):
+        # Saltar chunks completados sin sus resultados produciría una salida
+        # final incompleta. Es preferible retranscribirlos.
+        log.write("⚠️ Faltan los parciales del estado reanudable; se retranscribirán los chunks completados.")
+        state["completed_chunks"] = []
+        state["failed_chunks"] = []
+        save_state(state_path, state)
 
     # Normalize (opcional)
     audio_info = probe_audio_info(audio_path)
@@ -614,13 +713,25 @@ def run_pipeline(args: argparse.Namespace) -> None:
         f"channels={int(audio_info.get('channels') or 0)}"
     )
     input_for_split = audio_path
+    normalized_is_current = False
+    if os.path.exists(normalized_wav) and os.path.exists(normalized_metadata_file):
+        try:
+            with open(normalized_metadata_file, "r", encoding="utf-8") as f:
+                normalized_is_current = json.load(f).get("audio_source") == source_identity
+        except (OSError, ValueError, TypeError):
+            normalized_is_current = False
+
     if args.normalize:
-        if os.path.exists(normalized_wav):
+        if normalized_is_current:
             log.write("♻️ Reutilizando WAV normalizado existente.")
             input_for_split = normalized_wav
         elif audio_needs_normalization(audio_info):
+            if os.path.exists(normalized_wav):
+                log.write("⚠️ El WAV normalizado pertenece a otra versión del audio; se regenerará.")
             log.write("🔧 Normalizando a WAV 16k mono...")
             normalize_to_wav_16k_mono(audio_path, normalized_wav)
+            with open(normalized_metadata_file, "w", encoding="utf-8") as f:
+                json.dump({"audio_source": source_identity}, f, ensure_ascii=False, indent=2)
             input_for_split = normalized_wav
         else:
             log.write("✅ El audio ya está en 16 kHz mono; se reutiliza sin re-normalizar.")
@@ -642,8 +753,10 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 meta_chunks_obj.get("chunk_s") == args.chunk_s
                 and meta_chunks_obj.get("overlap_s") == args.overlap_s
                 and meta_chunks_obj.get("input_path") == input_for_split
+                and meta_chunks_obj.get("audio_source") == source_identity
             ):
-                can_reuse = True
+                listed_chunks = meta_chunks_obj.get("chunks") or []
+                can_reuse = bool(listed_chunks) and all(Path(str(item.get("path", ""))).is_file() for item in listed_chunks)
         except Exception:
             can_reuse = False
 
@@ -652,7 +765,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
         try:
             with open(chunks_metadata_file, "r", encoding="utf-8") as f:
                 meta_chunks_obj = json.load(f)
-            can_reuse = True
+            listed_chunks = meta_chunks_obj.get("chunks") or []
+            can_reuse = bool(listed_chunks) and all(
+                Path(str(item.get("path", ""))).is_file() for item in listed_chunks
+            )
+            if not can_reuse:
+                log.write("⚠️ Los chunks forzados están incompletos; se regenerarán.")
         except Exception:
             can_reuse = False
 
@@ -673,13 +791,19 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     if not chunks:
         log.write("✂️ Generando chunks...")
+        for stale_chunk in Path(chunks_dir).glob(f"{audio_name}_chunk_*.wav"):
+            stale_chunk.unlink()
         chunks = split_audio_fixed(input_for_split, chunks_dir, int(args.chunk_s), float(args.overlap_s), audio_name, input_duration_s)
         log.write(f"✅ Chunks generados: {len(chunks)}")
+
+        if not chunks:
+            raise RuntimeError("No se pudieron generar chunks. Verifica que el archivo contenga audio válido.")
 
         meta_chunks_obj = {
             "chunk_s": args.chunk_s,
             "overlap_s": args.overlap_s,
             "input_path": input_for_split,
+            "audio_source": source_identity,
             "duration_s": input_duration_s,
             "chunks": [{"idx": ch.idx, "path": ch.path, "start_s": ch.start_s, "end_s": ch.end_s} for ch in chunks],
         }
@@ -690,20 +814,59 @@ def run_pipeline(args: argparse.Namespace) -> None:
     state["total_chunks"] = len(chunks)
     save_state(state_path, state)
 
-    # Cargar modelos
-    log.write("🧠 Cargando modelo principal...")
-    model_main = load_whisper_model(args.model, args.device, args.compute_type, args.cpu_threads, args.num_workers)
+    try:
+        completed = {int(idx) for idx in (state.get("completed_chunks") or [])}
+        failed = {int(idx) for idx in (state.get("failed_chunks") or [])}
+    except (TypeError, ValueError):
+        completed = set()
+        failed = set()
+        state["completed_chunks"] = []
+        state["failed_chunks"] = []
+        save_state(state_path, state)
+        log.write("⚠️ Las listas de chunks del estado eran inválidas; se reiniciarán.")
+    valid_chunk_ids = {chunk.idx for chunk in chunks}
+    invalid_state_ids = completed.union(failed).difference(valid_chunk_ids)
+    if invalid_state_ids:
+        completed.intersection_update(valid_chunk_ids)
+        failed.intersection_update(valid_chunk_ids)
+        state["completed_chunks"] = sorted(completed)
+        state["failed_chunks"] = sorted(failed)
+        save_state(state_path, state)
+        log.write(f"🧹 Estado corregido: descartados chunks inexistentes {sorted(invalid_state_ids)}.")
 
-    model_fallback = None
-    fallback_available = bool(args.fallback_model and args.fallback_model != args.model)
+    stale_failures = completed.intersection(failed)
+    if stale_failures:
+        failed.difference_update(stale_failures)
+        state["failed_chunks"] = sorted(failed)
+        save_state(state_path, state)
+        log.write(f"🧹 Estado corregido: {len(stale_failures)} chunks completados dejaron de figurar como fallidos.")
 
-    completed = set(state.get("completed_chunks", []))
-    failed = set(state.get("failed_chunks", []))
+    removed_partials, retry_chunks = sanitize_partials(partials_jsonl, completed)
+    if retry_chunks:
+        completed.difference_update(retry_chunks)
+        failed.difference_update(retry_chunks)
+        state["completed_chunks"] = sorted(completed)
+        state["failed_chunks"] = sorted(failed)
+        save_state(state_path, state)
+        log.write(f"⚠️ Parciales corruptos: se retranscribirán los chunks {sorted(retry_chunks)}.")
+    if removed_partials:
+        log.write(f"🧹 Parciales corregidos: descartados {removed_partials} registros no confirmados.")
+
     pending_count = len([ch for ch in chunks if ch.idx not in completed])
     log.write(f"📦 Chunks: total={len(chunks)} completados={len(completed)} pendientes={pending_count} fallidos_previos={len(failed)}")
 
     if not os.path.exists(partials_jsonl):
         open(partials_jsonl, "w", encoding="utf-8").close()
+
+    model_main = None
+    if pending_count:
+        log.write("🧠 Cargando modelo principal...")
+        model_main = load_whisper_model(args.model, args.device, args.compute_type, args.cpu_threads, args.num_workers)
+    else:
+        log.write("♻️ Todos los chunks ya están completos; no se carga el modelo de transcripción.")
+
+    model_fallback = None
+    fallback_available = bool(args.fallback_model and args.fallback_model != args.model)
 
     t0 = time.time()
 
@@ -766,7 +929,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 f.write(json.dumps(sg, ensure_ascii=False) + "\n")
 
         completed.add(ch.idx)
+        failed.discard(ch.idx)
         state["completed_chunks"] = sorted(completed)
+        state["failed_chunks"] = sorted(failed)
         save_state(state_path, state)
 
         log.write(f"✅ Chunk {ch.idx} OK ({len(segs_global)} segs)")
@@ -790,7 +955,19 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # Diarización
     segments_for_diar = segments_global
     if args.diarize:
-        diar = diarize_light(segments_for_diar, int(args.num_speakers), float(args.turn_gap_s), float(args.force_turn_max_s))
+        if not normalized_is_current:
+            log.write("🔧 Preparando WAV PCM 16 kHz mono para diarización Sherpa...")
+            normalize_to_wav_16k_mono(audio_path, normalized_wav)
+            with open(normalized_metadata_file, "w", encoding="utf-8") as f:
+                json.dump({"audio_source": source_identity}, f, ensure_ascii=False, indent=2)
+        diar = diarize_sherpa(
+            normalized_wav,
+            segments_for_diar,
+            int(args.num_speakers),
+            args.diarization_model_dir,
+            diarization_threads,
+            sherpa_diarizer,
+        )
         if getattr(args, "review_diarization", False):
             diar = review_diarization_interactive(diar, int(args.num_speakers), ui_print)
         segments_final = diar
@@ -818,9 +995,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "normalized": bool(args.normalize),
         "vad_filter": bool(args.vad_filter),
         "diarize": bool(args.diarize),
+        "diarization_backend": "sherpa" if args.diarize else "disabled",
+        "diarization_model_dir": args.diarization_model_dir if args.diarize else "",
         "num_speakers": int(args.num_speakers),
-        "turn_gap_s": float(args.turn_gap_s),
-        "force_turn_max_s": float(args.force_turn_max_s),
         "review_diarization": bool(getattr(args, "review_diarization", False)),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "chunks_total": len(chunks),
@@ -831,7 +1008,10 @@ def run_pipeline(args: argparse.Namespace) -> None:
     }
 
     write_outputs(segments_final, meta, out_txt, out_json)
-    log.write("\n✅ Listo.")
+    if failed:
+        log.write("\n⚠️ Finalizado con errores; las salidas no incluyen los chunks fallidos.")
+    else:
+        log.write("\n✅ Listo.")
     log.write(f"📊 Resumen final: chunks_ok={len(completed)}/{len(chunks)} chunks_failed={len(failed)} elapsed={format_duration(t1 - t0)}")
     log.write(f"TXT:  {out_txt}")
     log.write(f"JSON: {out_json}")
@@ -872,9 +1052,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vad_filter", action=BooleanOptionalAction, default=DEFAULT_VAD_FILTER)
 
     p.add_argument("--diarize", action=BooleanOptionalAction, default=DEFAULT_DIARIZE)
+    p.add_argument(
+        "--diarization_model_dir",
+        default=DEFAULT_DIARIZATION_MODEL_DIR,
+        help="Directorio local de pesos de diarización.",
+    )
+    p.add_argument(
+        "--setup_diarization_models",
+        action="store_true",
+        help="Descarga explícitamente los pesos ligeros de Sherpa y sale.",
+    )
     p.add_argument("--num_speakers", type=int, default=DEFAULT_NUM_SPEAKERS)
-    p.add_argument("--turn_gap_s", type=float, default=DEFAULT_TURN_GAP_S)
-    p.add_argument("--force_turn_max_s", type=float, default=DEFAULT_FORCE_TURN_MAX_S)
     p.add_argument("--review_diarization", action=BooleanOptionalAction, default=DEFAULT_REVIEW_DIARIZATION)
 
     p.add_argument("--force_reuse_chunks", action=BooleanOptionalAction, default=False, help="Reusar chunks aunque config difiera (cautela).")
@@ -885,9 +1073,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.setup_diarization_models:
+        try:
+            paths = setup_sherpa_diarization_models(args.diarization_model_dir, ui_print)
+            require_sherpa_diarization(args.diarization_model_dir)
+            create_sherpa_diarizer(args.diarization_model_dir, DEFAULT_NUM_SPEAKERS)
+            ui_print("✅ Modelos de diarización listos:")
+            for name, path in paths.items():
+                ui_print(f"- {name}: {path}")
+        except Exception as exc:
+            ui_print(f"❌ ERROR preparando modelos de diarización: {exc}")
+            raise SystemExit(1)
+        return
     if args.audio is None:
         args = assisted_args()
-    run_pipeline(args)
+    try:
+        run_pipeline(args)
+    except KeyboardInterrupt:
+        ui_print("\n⚠️ Ejecución interrumpida. Puedes reanudarla con la misma configuración.")
+        raise SystemExit(130)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        ui_print(f"❌ ERROR: {exc}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

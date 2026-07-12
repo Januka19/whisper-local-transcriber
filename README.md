@@ -2,8 +2,8 @@
 
 Transcriptor local para audios largos basado en `faster-whisper`, pensado para
 ejecutarse en CPU y trabajar offline. Incluye asistente interactivo, reanudacion
-de trabajos, normalizacion de audio, postproceso de texto y diarizacion ligera
-por reglas.
+de trabajos, normalizacion de audio, postproceso de texto y diarizacion local
+con Sherpa ONNX.
 
 ## Caracteristicas
 
@@ -14,13 +14,13 @@ por reglas.
 - Normalizacion inteligente a WAV 16 kHz mono solo cuando el audio lo necesita.
 - Division en chunks con overlap, estado de reanudacion y parciales JSONL.
 - Postproceso opcional: limpieza de muletillas, reemplazos y fusion de segmentos.
-- Diarizacion ligera por turnos y pausas, con motivo y confianza por segmento en JSON.
+- Diarizacion local con modelo Sherpa ONNX ligero.
 - Salidas organizadas en texto y JSON.
 - Pruebas automatizadas con `pytest`.
 
 ## Requisitos
 
-- Python 3.11 o 3.12 recomendado.
+- Python 3.9 como minimo; Python 3.11 o 3.12 recomendado.
 - `ffmpeg` y `ffprobe` disponibles en `PATH`.
 - Linux/macOS o un entorno compatible con Bash para usar `run.sh`.
 
@@ -101,7 +101,9 @@ Si omites la ruta del audio, la aplicacion abre el asistente interactivo.
 
 ## Modelos
 
-El modelo por defecto es `Zoont/faster-whisper-large-v3-turbo-int8-ct2`.
+El modelo por defecto es `large-v3-turbo`, el alias CTranslate2 soportado
+directamente por `faster-whisper`. Se ejecuta con `compute_type=int8` para
+mantener un buen equilibrio entre precision, velocidad y memoria en CPU.
 Tambien se aceptan alias cortos, IDs de Hugging Face o rutas locales.
 
 Alias incluidos:
@@ -111,12 +113,44 @@ Alias incluidos:
 - `large-v3-turbo-int8-ct2`
 - `turbo`
 - `large-v3-turbo`
+- `quality` / `max-quality` (modelo `large-v3` completo; mas preciso, pero
+  considerablemente mas lento y pesado en CPU)
 - `large-v3`
 - `large-v2`
 - `medium`
+- `turbo-int8-legacy` (checkpoint anterior de Zoont, util si ya esta descargado
+  y necesitas seguir completamente offline)
+
+La primera ejecucion con el nuevo modelo por defecto puede descargarlo. Una vez
+presente en la cache local, las transcripciones posteriores vuelven a funcionar
+offline. Si solo tienes descargado el checkpoint usado por versiones anteriores,
+usa temporalmente `--model turbo-int8-legacy`.
 
 El fallback por defecto es `medium`, util si el modelo principal falla o no cabe
 en los recursos disponibles.
+
+## Diarizacion
+
+La diarizacion usa exclusivamente el modelo local Sherpa ONNX y esta activa por
+defecto. Nunca descarga pesos durante una transcripcion normal, por lo que debes
+prepararlos una vez antes de usarla.
+
+Prepara una vez los modelos de segmentacion Pyannote INT8 y embeddings TitaNet:
+
+```bash
+./run.sh --setup_diarization_models
+```
+
+Los pesos se guardan por defecto en `models/diarization/` y despues funcionan
+offline. Si no necesitas diarizacion, puedes omitirla explicitamente:
+
+```bash
+./run.sh entrevista.wav --no-diarize
+```
+
+La aplicacion comprueba la dependencia y los pesos antes de iniciar la
+transcripcion, evitando descubrir el problema despues de procesar un audio
+largo. Puedes cambiar su ubicacion con `--diarization_model_dir`.
 
 ## Opciones utiles
 
@@ -134,9 +168,8 @@ en los recursos disponibles.
 --resume / --no-resume
 --vad_filter / --no-vad_filter
 --diarize / --no-diarize
+--diarization_model_dir models/diarization
 --num_speakers 2
---turn_gap_s 1.2
---force_turn_max_s 30.0
 --review_diarization / --no-review_diarization
 --clean
 ```
@@ -148,12 +181,13 @@ mezclar parciales generados con parametros incompatibles.
 CPU. Puedes subirlo o fijarlo segun tu maquina; `--num_workers` controla workers
 internos del modelo y por defecto conserva el comportamiento actual.
 
-La diarizacion es local y ligera: alterna participantes cuando detecta pausas de
-`--turn_gap_s` o cuando un turno supera `--force_turn_max_s`. Para evitar falsos
-cambios, las interjecciones muy cortas despues de una pausa se conservan en el
-turno actual con menor confianza. En JSON cada segmento diarizado incluye
+La diarizacion siempre es local. Sherpa detecta los turnos mediante modelos ONNX
+y los alinea con los segmentos transcritos por mayor solapamiento temporal. En
+JSON cada segmento diarizado incluye
 `speaker`, `speaker_index`, `speaker_turn_index`, `diarization_reason` y
-`diarization_confidence` para revisar asignaciones ambiguas.
+`diarization_confidence`; la metadata registra Sherpa como backend.
+Si el modelo no produce ningun turno que solape un segmento, este queda sin
+hablante en lugar de recibir una atribucion inventada.
 
 La deteccion inicial de audio usa `ffprobe` para obtener formato y duracion en
 una sola pasada. Al dividir en chunks, el runner evita crear un ultimo fragmento
